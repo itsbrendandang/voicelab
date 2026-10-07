@@ -49,7 +49,7 @@ export function CalcCard({ entry, latest }: { entry: CalcEntry; latest: boolean 
               {r.table.rows.map((row, i) => (
                 <tr key={i}>
                   {row.map((cell, j) => (
-                    <td key={j} className={typeof cell === "number" ? "num" : undefined}>
+                    <td key={j}>
                       {cell}
                     </td>
                   ))}

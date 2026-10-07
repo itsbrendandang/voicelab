@@ -22,7 +22,7 @@ export function connectionLabel(state: VoiceLabState): { tone: "ok" | "pending" 
       return { tone: "ok", label: "Connected" };
     case "idle":
     case "connecting":
-      return { tone: "pending", label: state.attempt > 1 ? "Reconnecting…" : "Connecting…" };
+      return { tone: "pending", label: state.attempt > 0 ? "Reconnecting…" : "Connecting…" };
     case "handshaking":
       return { tone: "pending", label: "Starting session…" };
     case "reconnecting":
@@ -96,8 +96,16 @@ export function Header(props: HeaderProps) {
           >
             Hands-free
           </button>
-          <button type="button" aria-pressed={state.config.listen === "ptt"} onClick={() => props.onListenChange("ptt")}>
-            Push-to-talk
+          <button
+            type="button"
+            aria-pressed={state.config.listen === "ptt"}
+            onClick={() => props.onListenChange("ptt")}
+            aria-label="Push-to-talk"
+          >
+            <span className="label-long">Push-to-talk</span>
+            <span className="label-short" aria-hidden="true">
+              PTT
+            </span>
           </button>
         </div>
 

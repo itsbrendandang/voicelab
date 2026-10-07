@@ -28,8 +28,10 @@ export function parseServerMessage(data: string): ServerMessage | null {
 }
 
 export interface SocketEvents {
-  onConnecting(attempt: number): void;
+  /** `retry` = consecutive failed connections so far (0 on the first attempt). */
+  onConnecting(retry: number): void;
   onOpen(): void;
+  /** `attempt` = number of the upcoming retry (1, 2, ...). */
   onClose(info: { attempt: number; retryAt: number | null; reason: string }): void;
   onMessage(msg: ServerMessage, receivedAt: number): void;
   onBinary(data: ArrayBuffer): void;
@@ -47,7 +49,8 @@ const CONNECT_TIMEOUT_MS = 8_000;
 
 export class VoiceLabSocket {
   private ws: WebSocket | null = null;
-  private attempt = 0;
+  /** Consecutive failed/dropped connections since the last `session.ready`. */
+  private failures = 0;
   private retryTimer: ReturnType<typeof setTimeout> | null = null;
   private pingTimer: ReturnType<typeof setInterval> | null = null;
   private connectTimer: ReturnType<typeof setTimeout> | null = null;
@@ -120,8 +123,7 @@ export class VoiceLabSocket {
 
   private connect(): void {
     if (this.stopped) return;
-    this.attempt++;
-    this.events.onConnecting(this.attempt);
+    this.events.onConnecting(this.failures);
     let ws: WebSocket;
     try {
       ws = new WebSocket(this.url);
@@ -153,7 +155,7 @@ export class VoiceLabSocket {
         if (!msg) return;
         if (msg.type === "session.ready") {
           this.ready = true;
-          this.attempt = 0;
+          this.failures = 0;
         } else if (msg.type === "pong") {
           this.lastPong = receivedAt;
           if (typeof msg.t === "number") this.events.onRtt(receivedAt - msg.t);
@@ -187,13 +189,14 @@ export class VoiceLabSocket {
   }
 
   private scheduleRetry(reason: string): void {
+    this.failures++;
     if (this.stopped) {
-      this.events.onClose({ attempt: this.attempt, retryAt: null, reason });
+      this.events.onClose({ attempt: this.failures, retryAt: null, reason });
       return;
     }
-    const delay = backoffDelay(this.attempt);
+    const delay = backoffDelay(this.failures);
     const retryAt = Date.now() + delay;
-    this.events.onClose({ attempt: this.attempt, retryAt, reason });
+    this.events.onClose({ attempt: this.failures, retryAt, reason });
     this.retryTimer = setTimeout(() => {
       this.retryTimer = null;
       this.connect();

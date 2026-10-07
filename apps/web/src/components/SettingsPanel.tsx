@@ -96,7 +96,7 @@ export function SettingsPanel(props: SettingsPanelProps) {
   }, [capturing, onPttKey]);
 
   useEffect(() => {
-    panelRef.current?.focus();
+    panelRef.current?.focus({ preventScroll: true });
   }, []);
 
   return (

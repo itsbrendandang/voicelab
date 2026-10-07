@@ -83,10 +83,12 @@ function Toast({ entry, onDismiss }: { entry: AlertEntry; onDismiss(id: string):
 
 export function ToastAlerts({ alerts, onDismiss }: ToastProps) {
   return (
-    <div className="toasts" aria-live="polite">
-      {alerts.slice(0, 4).map((a) => (
-        <Toast key={a.alert.id} entry={a} onDismiss={onDismiss} />
-      ))}
+    <div className="toasts">
+      <div className="toasts-inner" aria-live="polite">
+        {alerts.slice(0, 4).map((a) => (
+          <Toast key={a.alert.id} entry={a} onDismiss={onDismiss} />
+        ))}
+      </div>
     </div>
   );
 }

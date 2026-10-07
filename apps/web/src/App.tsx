@@ -157,7 +157,7 @@ export function App() {
   const offlineReason =
     state.connection === "failed"
       ? "Session ended — press Reconnect above"
-      : state.connection === "handshaking" || (state.connection === "connecting" && state.attempt <= 1)
+      : state.connection === "handshaking" || (state.connection === "connecting" && state.attempt === 0)
         ? "Connecting to the server…"
         : "Offline — waiting for the server";
 

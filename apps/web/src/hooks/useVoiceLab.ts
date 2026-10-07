@@ -42,7 +42,7 @@ export function useVoiceLab(opts: UseVoiceLabOptions): VoiceLabApi {
     const socket = new VoiceLabSocket(
       opts.url ?? defaultSocketUrl(),
       {
-        onConnecting: (attempt) => dispatch({ type: "ws/connecting", attempt }),
+        onConnecting: (retry) => dispatch({ type: "ws/connecting", attempt: retry }),
         onOpen: () => dispatch({ type: "ws/open" }),
         onClose: ({ attempt, retryAt, reason }) => dispatch({ type: "ws/closed", attempt, retryAt, reason }),
         onRtt: (ms) => dispatch({ type: "rtt", ms }),

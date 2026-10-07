@@ -92,6 +92,7 @@ export interface StatusFlags {
 
 export interface VoiceLabState {
   connection: ConnectionStatus;
+  /** Consecutive failed connections (0 = first connect / healthy); while reconnecting, the upcoming retry number. */
   attempt: number;
   retryAt: number | null;
   lastCloseReason: string | null;

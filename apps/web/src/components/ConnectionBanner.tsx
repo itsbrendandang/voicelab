@@ -34,7 +34,7 @@ export function ConnectionBanner({ state, onRetry }: { state: VoiceLabState; onR
     );
   }
 
-  const firstConnect = state.connection === "idle" || ((state.connection === "connecting" || state.connection === "handshaking") && state.attempt <= 1);
+  const firstConnect = state.connection === "idle" || ((state.connection === "connecting" || state.connection === "handshaking") && state.attempt === 0);
   if (firstConnect) {
     return (
       <div className="conn-banner tone-pending" role="status">
@@ -49,7 +49,7 @@ export function ConnectionBanner({ state, onRetry }: { state: VoiceLabState; onR
       <p>
         <strong>Can't reach the voicelab server.</strong>{" "}
         {state.connection === "reconnecting"
-          ? `Retrying ${secs > 0 ? `in ${secs} s` : "now"} (attempt ${state.attempt}).`
+          ? `Retrying ${secs > 0 ? `in ${secs} s` : "now"} (retry ${state.attempt}).`
           : "Reconnecting…"}{" "}
         Voice, typing and step controls are paused until it's back; nothing is sent while offline.
         {state.lastCloseReason && <span className="muted"> ({state.lastCloseReason})</span>}
