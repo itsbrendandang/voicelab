@@ -315,6 +315,8 @@ export class ExperimentRun {
   recordMeasurement(input: RecordMeasurementInput): RecordMeasurementResult {
     if (typeof input.value !== "number" || !Number.isFinite(input.value)) throw new Error("Measurement value must be a finite number");
     const sop = this._sop;
+    const scaled = splitMultiplier(input.unit ?? "");
+    input = { ...input, value: input.value * scaled.multiplier, unit: scaled.unit };
     const stepId = input.stepId ?? this._state.currentStepId;
     const preferStep = sop && stepId ? sop.steps.find((s) => s.id === stepId) : undefined;
     const match = sop ? matchSpec(sop, { label: input.label, specId: input.specId, unit: input.unit ?? "" }, preferStep) : undefined;
@@ -347,7 +349,7 @@ export class ExperimentRun {
     if (conv.ok) {
       value = conv.value;
       unit = spec.unit;
-      if (conv.converted) notes.push(`reported as ${formatNumber(input.value)} ${reportedUnit}`);
+      if (conv.converted) notes.push(`reported as ${withUnit(input.value, reportedUnit)}`);
       if (spec.min !== undefined || spec.max !== undefined) {
         const tol = 1e-9 * Math.max(1, Math.abs(value));
         inRange = (spec.min === undefined || value >= spec.min - tol) && (spec.max === undefined || value <= spec.max + tol);
@@ -380,13 +382,13 @@ export class ExperimentRun {
       const severity: DeviationSeverity = isFarOut(value, spec) || step.critical ? "critical" : "major";
       const stepNo = sop.steps.indexOf(step) + 1;
       deviation = this.addDeviation({
-        description: `${spec.label} = ${formatNumber(value)} ${spec.unit} is ${low ? "below" : "above"} the expected ${formatMeasurementRange(spec)} (step ${stepNo}: ${step.title}).`,
+        description: `${spec.label} = ${withUnit(value, spec.unit)} is ${low ? "below" : "above"} the expected ${formatMeasurementRange(spec)} (step ${stepNo}: ${step.title}).`,
         severity,
         source: "measurement",
         stepId: step.id,
         relatedMeasurementId: id,
       });
-      if (spec.outOfRangeHint) guidance.push(spec.outOfRangeHint);
+      if (spec.outOfRangeHint?.trim()) guidance.push(spec.outOfRangeHint.replace(/\s+/g, " ").trim());
       for (const t of relevantTroubleshooting(sop, step, spec.label, low)) guidance.push(describeTroubleshooting(t));
     }
     return { measurement, ...(deviation ? { deviation } : {}), guidance };
@@ -479,8 +481,9 @@ function isFarOut(v: number, spec: { min?: number; max?: number; target?: number
 
 function relevantTroubleshooting(sop: Sop, step: Step, label: string, low: boolean): Troubleshooting[] {
   if (!sop.troubleshooting.length) return [];
-  const direction = low ? "low weak below faint no signal" : "high above saturated too much strong";
-  const scored = scoreQuery(buildSopIndex(sop), `${label} ${direction}`, (d) => d.kind === "troubleshooting");
+  const core = label.replace(/\([^)]*\)/g, " ");
+  const direction = low ? "low below" : "high above";
+  const scored = scoreQuery(buildSopIndex(sop), `${core} ${direction}`, (d) => d.kind === "troubleshooting");
   const lexical = new Map<number, number>();
   for (const s of scored) lexical.set(Number(s.doc.ref), s.score);
   const maxLex = Math.max(1e-9, ...lexical.values());
@@ -490,9 +493,26 @@ function relevantTroubleshooting(sop: Sop, step: Step, label: string, low: boole
       const lex = (lexical.get(i) ?? 0) / maxLex;
       return { t, i, score: (related ? 1 : 0) + lex, related, lex };
     })
-    .filter((x) => x.related || x.lex >= 0.35)
+    .filter((x) => (x.related && x.lex > 0) || x.lex >= 0.5 || (x.related && !scored.length))
     .sort((a, b) => b.score - a.score || a.i - b.i);
   return ranked.slice(0, 2).map((x) => x.t);
+}
+
+function withUnit(v: number, unit: string): string {
+  if (!unit) return formatNumber(v);
+  return unit === "%" ? `${formatNumber(v)}%` : `${formatNumber(v)} ${unit}`;
+}
+
+const MULTIPLIER_RE = /^\s*(?:(thousand|million|billion)\b|(?:[x×*]\s*)?10\s*(?:\^|\*\*)\s*(\d+)\b|e(\d+)\b)\s*/i;
+
+/** "million cells/mL" -> {1e6, "cells/mL"}; "x10^6 cells/mL" -> {1e6, "cells/mL"}. */
+export function splitMultiplier(unit: string): { multiplier: number; unit: string } {
+  const m = unit.match(MULTIPLIER_RE);
+  if (!m || m[0].length === unit.length) return { multiplier: 1, unit };
+  const word = m[1]?.toLowerCase();
+  const exp = m[2] ?? m[3];
+  const multiplier = word === "thousand" ? 1e3 : word === "million" ? 1e6 : word === "billion" ? 1e9 : 10 ** Number(exp);
+  return { multiplier, unit: unit.slice(m[0].length) };
 }
 
 function describeTroubleshooting(t: Troubleshooting): string {

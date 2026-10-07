@@ -1,0 +1,226 @@
+# DEMO CONTENT for voicelab development and testing. Not a validated protocol.
+# Volumes and ranges are typical for a microplate Bradford assay (Coomassie
+# G-250, 5 µL sample + 250 µL reagent). Check your kit insert, SDS and local
+# rules before using anything like this at a real bench.
+id: bradford-assay
+title: Bradford Protein Assay (Microplate)
+version: "1.2"
+domain: biochemistry
+summary: >
+  Measure total protein in up to 20 samples against a BSA standard curve
+  (125–2000 µg/mL) using Coomassie dye reagent in a clear 96-well plate,
+  read at 595 nm. Standards and samples in triplicate.
+ppe:
+  - Lab coat
+  - Nitrile gloves
+  - Safety glasses
+equipment:
+  - Clear flat-bottom 96-well plate
+  - Microplate reader with a 595 nm filter
+  - P20 and P200 pipettes, 8-channel P300 multichannel
+  - Reagent reservoir
+  - 1.5 mL microcentrifuge tubes and rack
+  - Plate shaker
+reagents:
+  - id: bradford-reagent
+    name: Bradford dye reagent (1X, ready to use)
+    aliases: [Bradford, Bradford reagent, Coomassie, Coomassie reagent, dye reagent, protein assay dye, Coomassie Plus]
+    hazards: [H290, H315, H319]
+    storage: 2–8 °C, protected from light. Bring to room temperature before use.
+    notes: Contains phosphoric acid and methanol. Don't vortex hard; foam and bubbles skew the reading.
+  - id: bsa-standard
+    name: BSA standard, 2 mg/mL
+    aliases: [BSA, bovine serum albumin, albumin standard, protein standard, standard]
+    stock: { value: 2, unit: mg/mL }
+    molecularWeight: 66430
+    storage: 2–8 °C. Mix gently before opening the ampule.
+  - id: diluent
+    name: Sample buffer (PBS or the buffer your samples are in)
+    aliases: [PBS, buffer, diluent, blank buffer, sample buffer]
+    notes: Standards must be diluted in the same buffer as the samples so the blank matches.
+  - id: samples
+    name: Protein samples (cell lysate or purified protein)
+    aliases: [samples, unknowns, lysate, unknown samples, protein samples]
+    notes: Keep on ice. Detergents above ~0.1% SDS or 1% Triton X-100 interfere with the dye.
+steps:
+  - id: equilibrate
+    title: Equilibrate reagent to room temperature
+    instruction: >
+      Take the Bradford reagent out of the fridge and let it reach room temperature
+      (about 20 minutes). Invert the bottle gently a few times to mix. Do not vortex.
+    spoken: Get the Bradford reagent out of the fridge and let it warm up for about twenty minutes. Mix by gently inverting, not vortexing.
+    reagents: [bradford-reagent]
+    checks:
+      - Reagent is at room temperature (cold reagent gives a lower color response)
+      - No visible precipitate in the bottle
+    timer: { seconds: 1200, label: Reagent warm-up }
+  - id: standards
+    title: Prepare BSA standard series
+    instruction: >
+      Label nine tubes A–I. From the 2 mg/mL BSA stock make 2000, 1500, 1000, 750,
+      500, 250, 125, 25 and 0 µg/mL standards in sample buffer (for example 300 µL
+      stock for A; 375 µL stock + 125 µL buffer for B; 325 µL stock + 325 µL buffer for C;
+      then serially dilute 1:1 or as your kit table shows). Use a fresh tip for each tube
+      and mix each standard by pipetting before taking from it.
+    spoken: Make the BSA standards from two thousand down to zero micrograms per mil in sample buffer, fresh tip every tube.
+    reagents: [bsa-standard, diluent]
+    caution: Standards made in a different buffer than the samples give a biased curve.
+    checks:
+      - Nine labeled standards, A (2000 µg/mL) to I (0 µg/mL blank)
+      - Same buffer used for standards and samples
+  - id: samples
+    title: Dilute samples into range
+    instruction: >
+      Dilute each unknown so it should land between 125 and 1500 µg/mL. If you don't
+      know the concentration, prepare neat, 1:5 and 1:10 dilutions in sample buffer.
+    spoken: Dilute your samples into the range of the curve. If unsure, do neat, one to five and one to ten.
+    reagents: [samples, diluent]
+    checks:
+      - Dilution factor written down for every sample
+  - id: plate
+    title: Load standards and samples
+    instruction: >
+      Pipette 5 µL of each standard and each sample into the plate in triplicate.
+      Pipette onto the bottom of the well without touching it, and avoid bubbles.
+      Record the plate layout.
+    spoken: Load five microliters of each standard and sample in triplicate. No bubbles.
+    reagents: [bsa-standard, samples]
+    checks:
+      - Triplicates for every standard and sample
+      - Plate layout recorded
+      - No bubbles in the wells
+  - id: add-reagent
+    title: Add Bradford reagent
+    instruction: >
+      Pour reagent into a reservoir and add 250 µL to every well with the multichannel,
+      dispensing down the side of the well. Mix on the plate shaker for 30 seconds.
+    spoken: Add two fifty microliters of reagent to every well with the multichannel, then shake thirty seconds.
+    reagents: [bradford-reagent]
+    caution: The reagent is acidic. Wipe up drips and keep it off skin and eyes.
+    checks:
+      - Every well received reagent
+      - Bubbles popped with a clean tip if present
+  - id: incubate
+    title: Incubate for color development
+    instruction: >
+      Incubate at room temperature for 10 minutes, protected from bright light. Read
+      within 60 minutes; the color slowly drifts and the dye can precipitate.
+    spoken: Incubate ten minutes at room temperature. Read within the hour.
+    timer: { seconds: 600, label: Bradford color development }
+  - id: read
+    title: Read absorbance at 595 nm
+    instruction: >
+      Read the plate at 595 nm. Subtract the average blank (standard I, 0 µg/mL) from
+      every well. Report the raw blank, the blank-corrected top standard, and any
+      sample readings.
+    spoken: Read the plate at five ninety-five and blank-correct.
+    measurements:
+      - id: blank-a595
+        label: Blank A595 (raw, 0 µg/mL)
+        unit: AU
+        min: 0.3
+        max: 0.65
+        target: 0.45
+        outOfRangeHint: >
+          A high blank usually means old or contaminated reagent, a dirty plate, or detergent
+          in the buffer. A low blank suggests the wrong wavelength or diluted reagent.
+      - id: top-standard-a595
+        label: Top standard A595 (2000 µg/mL, blank-corrected)
+        unit: AU
+        min: 0.8
+        max: 1.6
+        outOfRangeHint: >
+          A weak top standard means the reagent was cold or expired, the plate was read too
+          soon, or the BSA standards were made wrong. Above range, check for a pipetting error.
+      - id: sample-a595
+        label: Sample A595 (blank-corrected)
+        unit: AU
+        min: 0.05
+        max: 1.2
+        outOfRangeHint: >
+          Above 1.2 the sample is past the linear part of the curve, so dilute it further and
+          re-assay. Below 0.05 it is too dilute, so use a lower dilution.
+    checks:
+      - Reader set to 595 nm
+      - Blank subtracted from every well
+  - id: analyze
+    title: Fit the standard curve and check quality
+    critical: true
+    instruction: >
+      Plot blank-corrected A595 against concentration for the standards and fit a
+      quadratic (or linear over 125–1000 µg/mL). The curve must have R² ≥ 0.98 and
+      the replicate CV must be ≤ 10% before you report any sample values. Multiply
+      interpolated values by each sample's dilution factor.
+    spoken: Fit the curve. You need R squared of at least zero point nine eight and replicate CV under ten percent before reporting.
+    measurements:
+      - id: r2
+        label: Standard curve R²
+        unit: R²
+        min: 0.98
+        max: 1
+        outOfRangeHint: >
+          A poor fit usually comes from pipetting error in the standards, bubbles, or one bad
+          standard. Look for an outlier triplicate before re-running.
+      - id: replicate-cv
+        label: Replicate CV
+        unit: "%"
+        max: 10
+        outOfRangeHint: High CV points to pipetting variability, bubbles, or poorly mixed wells.
+    checks:
+      - R² ≥ 0.98
+      - Sample values fall inside the standard range
+      - Dilution factors applied
+troubleshooting:
+  - symptom: Standard curve R² below 0.98
+    likelyCauses:
+      - Pipetting error when making or loading standards
+      - Bubbles in wells
+      - A single bad standard tube
+    actions:
+      - Check the triplicates for an outlier and exclude it with a note
+      - Pop bubbles with a clean tip and re-read
+      - Remake the standards with fresh tips and re-run
+    relatedSteps: [standards, plate, read, analyze]
+  - symptom: Blank absorbance high or all wells look blue
+    likelyCauses:
+      - Detergent (SDS, Triton) or high salt in the sample buffer
+      - Contaminated or expired reagent
+      - Dirty or scratched plate
+    actions:
+      - Check buffer compatibility with the kit's interference table
+      - Use fresh reagent and a new plate
+      - Dilute samples further or use a detergent-compatible assay (BCA)
+    relatedSteps: [equilibrate, read]
+  - symptom: Low signal across all standards
+    likelyCauses:
+      - Reagent still cold from the fridge
+      - Read too soon after adding reagent
+      - Wrong wavelength
+      - Expired reagent
+    actions:
+      - Warm the reagent to room temperature
+      - Incubate the full 10 minutes
+      - Confirm the reader is at 595 nm
+    relatedSteps: [equilibrate, incubate, read]
+  - symptom: Sample absorbance above the top standard
+    likelyCauses:
+      - Sample too concentrated
+    actions:
+      - Dilute the sample further (1:10 or 1:20) and re-assay
+      - Never extrapolate beyond the highest standard
+    relatedSteps: [samples, read]
+  - symptom: Precipitate or drifting readings
+    likelyCauses:
+      - Plate read more than an hour after adding reagent
+      - Detergent in the sample
+    actions:
+      - Read within 60 minutes
+      - Re-run with fresh reagent and detergent-compatible dilutions
+    relatedSteps: [incubate, read]
+waste: >
+  Collect leftover dye reagent and used plates per local chemical waste rules (the
+  reagent contains phosphoric acid and methanol). Don't pour reagent down the sink.
+  Tips and tubes go in solid lab waste.
+references:
+  - Bradford MM (1976) Anal Biochem 72:248–254
+  - Manufacturer's Coomassie (Bradford) microplate protocol

@@ -28,7 +28,8 @@ export const STOPWORDS = new Set(
     "i me my mine we us our you your he she they them their what which who whom whose when where why how " +
     "can could should would will shall may might must need needs let lets let's please just ok okay um uh " +
     "there here some any all each every no not very much many more most also too up down out again " +
-    "go goes going get gets got tell say said know"
+    "go goes going get gets got tell say said know " +
+    "t s d ll re ve m don doesn didn isn aren wasn weren won wouldn shouldn couldn"
   ).split(/\s+/),
 );
 

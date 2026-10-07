@@ -1,0 +1,288 @@
+# DEMO CONTENT for voicelab development and testing. Not a validated protocol.
+# Volumes follow a generic Taq polymerase setup (25 µL reactions). Check your
+# enzyme's datasheet, the SDSs and local rules before using anything like this.
+id: pcr-setup
+title: Endpoint PCR Setup and Gel Check
+version: "2.0"
+domain: molecular biology
+summary: >
+  Set up 25 µL Taq PCR reactions from a master mix (with no-template and positive
+  controls), run a standard three-step program, and check a 500 bp product on a
+  1.5% agarose gel.
+ppe:
+  - Lab coat
+  - Nitrile gloves
+  - Safety glasses
+  - UV face shield for gel imaging
+equipment:
+  - Thermocycler with heated lid
+  - PCR strip tubes or 96-well PCR plate
+  - P2, P10, P20 and P200 pipettes with filter tips
+  - Ice bucket or cold block
+  - Mini centrifuge
+  - Gel casting tray, comb, electrophoresis tank and power supply
+  - Microwave and heat-resistant gloves
+  - Blue-light or UV gel imager
+reagents:
+  - id: taq-buffer
+    name: 10X Taq reaction buffer (with MgCl2)
+    aliases: [buffer, PCR buffer, 10X buffer, Taq buffer, reaction buffer]
+    stock: { value: 10, unit: X }
+    storage: -20 °C
+  - id: dntps
+    name: dNTP mix, 10 mM each
+    aliases: [dNTPs, dNTP, nucleotides, dNTP mix]
+    stock: { value: 10, unit: mM }
+    storage: -20 °C. Avoid repeated freeze-thaw; aliquot.
+  - id: primer-fwd
+    name: Forward primer, 10 µM
+    aliases: [forward primer, fwd primer, forward, F primer]
+    stock: { value: 10, unit: µM }
+    storage: -20 °C
+  - id: primer-rev
+    name: Reverse primer, 10 µM
+    aliases: [reverse primer, rev primer, reverse, R primer]
+    stock: { value: 10, unit: µM }
+    storage: -20 °C
+  - id: taq
+    name: Taq DNA polymerase, 5 U/µL
+    aliases: [Taq, polymerase, enzyme, Taq polymerase]
+    stock: { value: 5, unit: U/µL }
+    storage: -20 °C in 50% glycerol. Keep in a cold block; don't vortex.
+    notes: Add the enzyme last and mix by gentle pipetting or flicking.
+  - id: water
+    name: Nuclease-free water
+    aliases: [water, nuclease free water, PCR water, H2O]
+  - id: template
+    name: Template DNA (1–10 ng plasmid or 10–100 ng genomic)
+    aliases: [template, DNA, gDNA, plasmid, sample DNA]
+  - id: positive-control
+    name: Positive control template
+    aliases: [positive control, pos control, control DNA]
+  - id: tae
+    name: 50X TAE buffer
+    aliases: [TAE, running buffer, gel buffer, Tris acetate EDTA]
+    stock: { value: 50, unit: X }
+    hazards: [H315, H319]
+    notes: Dilute to 1X for both the gel and the running buffer.
+  - id: agarose
+    name: Agarose (molecular biology grade)
+    aliases: [agarose, gel powder]
+  - id: gel-stain
+    name: Ethidium bromide, 10 mg/mL
+    aliases: [ethidium bromide, EtBr, ethidium, gel stain, stain]
+    stock: { value: 10, unit: mg/mL }
+    hazards: [H302, H330, H341]
+    storage: Room temperature, dark, in the EtBr area
+    notes: Use 0.5 µg/mL final in the gel. Labs that use SYBR Safe can substitute it at 1X.
+  - id: loading-dye
+    name: 6X DNA loading dye
+    aliases: [loading dye, dye, 6X dye, gel loading dye]
+    stock: { value: 6, unit: X }
+  - id: ladder
+    name: 100 bp DNA ladder
+    aliases: [ladder, marker, DNA ladder, size marker]
+steps:
+  - id: clean-bench
+    title: Clean the pre-PCR area
+    instruction: >
+      Work in the pre-PCR area, away from post-PCR products. Wipe the bench and pipettes
+      with a DNA decontamination solution or 10% bleach, then with 70% ethanol to remove
+      residue. Use filter tips throughout.
+    spoken: Wipe down the pre-PCR bench and pipettes, decon first then seventy percent ethanol. Filter tips only.
+    checks:
+      - Working in the pre-PCR area
+      - No amplified product on this bench
+  - id: thaw
+    title: Thaw reagents on ice
+    instruction: >
+      Thaw buffer, dNTPs and primers on ice. Vortex briefly and spin down each tube.
+      Keep the Taq in a cold block and do not vortex it.
+    spoken: Thaw buffer, dNTPs and primers on ice, vortex and spin them down. Taq stays in the cold block.
+    reagents: [taq-buffer, dntps, primer-fwd, primer-rev, taq]
+    checks:
+      - All reagents fully thawed and mixed
+      - Taq kept cold
+  - id: plan
+    title: Plan the master mix
+    instruction: >
+      Count reactions: samples plus one no-template control (NTC) plus one positive
+      control. Calculate the master mix with 10% overage. Per 25 µL reaction:
+      2.5 µL 10X buffer, 0.5 µL 10 mM dNTPs (200 µM final), 0.5 µL each 10 µM primer
+      (0.2 µM final), 0.125 µL Taq (0.625 U), water to 24 µL; template 1 µL added separately.
+    spoken: Count samples plus the no-template and positive controls, then work out the master mix with ten percent extra.
+    checks:
+      - NTC and positive control included in the count
+  - id: master-mix
+    title: Assemble the master mix
+    instruction: >
+      In a 1.5 mL tube on ice, add in order water, 10X buffer, dNTPs, forward primer,
+      reverse primer and Taq last. Mix by gentle pipetting or flicking, then spin down.
+    spoken: Build the master mix on ice. Water first, Taq last, then mix gently and spin down.
+    reagents: [water, taq-buffer, dntps, primer-fwd, primer-rev, taq]
+    checks:
+      - Every component added (tick them off as you go)
+      - Taq added last
+  - id: aliquot
+    title: Aliquot master mix
+    instruction: Dispense 24 µL of master mix into each labeled PCR tube or well. Keep on ice.
+    spoken: Put twenty-four microliters of master mix in each tube.
+    checks:
+      - Tubes labeled
+      - Same volume in every tube
+  - id: add-template
+    title: Add template and controls
+    critical: true
+    instruction: >
+      Add 1 µL template to each sample tube, 1 µL nuclease-free water to the NTC and
+      1 µL positive control template to the positive control. Add the NTC water before
+      opening any template tube. Cap, flick, and spin down.
+    spoken: Add one microliter of template per tube. The no-template control gets water, and do it before you open any DNA.
+    reagents: [template, water, positive-control]
+    caution: Change tips between every template; cross-contamination will show up in the NTC.
+    checks:
+      - NTC received water, not DNA
+      - Positive control received control template
+      - All tubes capped and spun down
+  - id: cycle
+    title: Run the thermocycler
+    instruction: >
+      Load the tubes and run: 95 °C 30 s; 30 cycles of 95 °C 15 s, anneal 15 s
+      (about 5 °C below primer Tm, typically 55–60 °C), 68 °C 30 s; final extension
+      68 °C 5 min; hold 4–10 °C. Heated lid on.
+    spoken: Load the cycler and start the program. Check the annealing temperature before you hit run.
+    measurements:
+      - id: annealing-temp
+        label: Annealing temperature
+        unit: °C
+        min: 50
+        max: 65
+        target: 58
+        outOfRangeHint: >
+          Too low an annealing temperature gives extra bands and primer dimers; too high
+          gives weak or no product. Use about 5 °C below the lower primer Tm.
+    checks:
+      - Heated lid on
+      - Correct program selected
+    timer: { seconds: 5400, label: PCR run (about 90 min) }
+  - id: cast-gel
+    title: Cast a 1.5% agarose gel
+    instruction: >
+      Weigh 1.5 g agarose into 100 mL 1X TAE in a flask at least three times the liquid
+      volume. Microwave in short bursts, swirling between, until fully dissolved. Cool
+      to about 55–60 °C, add ethidium bromide to 0.5 µg/mL (5 µL of 10 mg/mL), swirl,
+      pour and insert the comb. Let it set.
+    spoken: Make a one point five percent agarose gel in TAE. Microwave carefully, cool it, add stain, pour, and let it set.
+    reagents: [agarose, tae, gel-stain]
+    caution: >
+      Superheated agarose can boil over violently. Use heat-resistant gloves and swirl
+      gently. Add ethidium bromide only after cooling, in the EtBr area, with nitrile gloves.
+    measurements:
+      - id: gel-temp
+        label: Agarose temperature before adding stain
+        unit: °C
+        min: 50
+        max: 65
+        outOfRangeHint: Above 65 °C the stain degrades and vapors increase; below 50 °C the gel starts setting unevenly.
+    timer: { seconds: 1800, label: Gel setting }
+  - id: run-gel
+    title: Load and run the gel
+    instruction: >
+      Mix 5 µL of each PCR product with 1 µL 6X loading dye. Load 5 µL ladder in the
+      first lane, then samples, NTC and positive control. Run at 100–120 V for about
+      35 minutes, until the dye front is two-thirds down the gel.
+    spoken: Mix five microliters of product with one of loading dye, load ladder first, and run at about a hundred volts.
+    reagents: [loading-dye, ladder]
+    caution: Check that the DNA runs toward the red (positive) electrode before walking away.
+    measurements:
+      - id: voltage
+        label: Gel voltage
+        unit: V
+        min: 80
+        max: 130
+        target: 110
+        outOfRangeHint: Too high a voltage overheats the gel and smears bands; too low takes much longer.
+    timer: { seconds: 2100, label: Gel run }
+  - id: image
+    title: Image the gel and check bands
+    critical: true
+    instruction: >
+      Image on the blue-light or UV imager. The expected product is a single band near
+      500 bp. The NTC lane must be blank and the positive control must show the band
+      for the run to be valid.
+    spoken: Image the gel. You want one band near five hundred base pairs, a clean no-template lane, and a positive control band.
+    reagents: [gel-stain]
+    caution: UV burns eyes and skin. Close the imager door, or wear a UV face shield on an open transilluminator.
+    measurements:
+      - id: band-size
+        label: Product band size
+        unit: bp
+        min: 450
+        max: 550
+        target: 500
+        outOfRangeHint: >
+          A band far from 500 bp suggests mispriming or the wrong template. Check primers,
+          raise the annealing temperature, and sequence if in doubt.
+    checks:
+      - NTC lane is blank
+      - Positive control shows the expected band
+      - Image saved with lane labels
+troubleshooting:
+  - symptom: Band in the no-template control (NTC)
+    likelyCauses:
+      - Contaminated reagent (often water or primers)
+      - Carryover of PCR product into the pre-PCR area
+      - Template added to the NTC by mistake
+    actions:
+      - Discard the working aliquots and use fresh ones
+      - Decontaminate the bench and pipettes
+      - Set up the NTC before opening any template
+    relatedSteps: [clean-bench, master-mix, add-template]
+  - symptom: No product or a very faint band
+    likelyCauses:
+      - Missing master mix component (often Taq or primers)
+      - Annealing temperature too high
+      - Degraded or too little template
+      - Inactive enzyme from warming or vortexing
+    actions:
+      - Check the positive control; if it also failed, remake the master mix
+      - Lower the annealing temperature by 3–5 °C
+      - Check template quality and amount
+    relatedSteps: [master-mix, add-template, cycle]
+  - symptom: Multiple bands or a smear
+    likelyCauses:
+      - Annealing temperature too low
+      - Too much template
+      - Too many cycles
+    actions:
+      - Raise the annealing temperature or run a gradient
+      - Use less template
+      - Reduce to 25–28 cycles
+    relatedSteps: [cycle, add-template]
+  - symptom: Primer-dimer band below 100 bp
+    likelyCauses:
+      - Primer concentration too high
+      - Low annealing temperature
+      - Reactions left at room temperature before cycling
+    actions:
+      - Keep reactions on ice and start the run promptly
+      - Lower primer concentration to 0.1 µM
+    relatedSteps: [master-mix, cycle]
+  - symptom: Smeared or distorted gel bands
+    likelyCauses:
+      - Voltage too high
+      - Overloaded wells
+      - Gel poured too hot or uneven
+    actions:
+      - Run at 100 V
+      - Load less product
+      - Let agarose cool before pouring
+    relatedSteps: [cast-gel, run-gel]
+waste: >
+  Ethidium bromide gels, tips and solutions go in the labeled EtBr waste, never the
+  regular trash or sink. PCR tubes with amplified product go in solid waste outside
+  the pre-PCR area. Spent 1X TAE without stain can go down the drain with water if
+  local rules allow.
+references:
+  - Generic Taq DNA polymerase datasheet, 25 µL reaction setup
+  - Local EtBr handling and disposal procedure

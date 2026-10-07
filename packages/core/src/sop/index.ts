@@ -178,7 +178,7 @@ function fuzzyStep(sop: Sop, text: string, curIdx: number): Step | undefined {
     let strong = false;
     for (const tok of unique) {
       if (title.has(tok) || id.has(tok)) {
-        score += 3;
+        score += (title.has(tok) ? 3 : 0) + (id.has(tok) ? 2 : 0);
         strong = true;
       } else if (medium.has(tok)) {
         score += 1.5;
@@ -235,11 +235,18 @@ export interface SopSearchHit {
   score: number;
 }
 
+const PROBLEM_CUE =
+  /\b(not|no|won t|isn t|aren t|doesn t|didn t|can t|cannot|too|fail\w*|wrong|problem|issue|why|bad|weird|low|high|never|nothing|error|off|instead|missing|cloudy|stuck)\b/;
+
 /** Lexical (BM25-style) search over steps, reagents, troubleshooting, PPE, waste. No network, no embeddings. */
 export function searchSop(sop: Sop, query: string, limit?: number): SopSearchHit[] {
   const lim = limit === undefined ? 5 : Math.max(0, Math.floor(limit));
   if (!lim || typeof query !== "string" || !query.trim()) return [];
+  // "not detaching", "won't", "too low", "why is..." read as a problem report: favor troubleshooting
+  const problem = PROBLEM_CUE.test(cleanText(query));
   return scoreQuery(buildSopIndex(sop), query)
+    .map((h) => (problem && h.doc.kind === "troubleshooting" ? { ...h, score: h.score * 1.3 } : h))
+    .sort((a, b) => b.score - a.score || a.order - b.order)
     .slice(0, lim)
     .map(({ doc, score }) => ({ kind: doc.kind, ref: doc.ref, title: doc.title, text: doc.text, score: Math.round(score * 1000) / 1000 }));
 }
@@ -247,15 +254,21 @@ export function searchSop(sop: Sop, query: string, limit?: number): SopSearchHit
 // ------------------------------------------------------------------ prompt rendering
 
 /** "0.05–1.2 AU (target 0.5)", "≥ 90 %", "≤ 10 %", "target 8 pH". */
+/** Lossless number text: thousands grouped for integers >= 10,000 ("1,500,000"), otherwise String(). */
+function fmtNum(n: number): string {
+  if (Number.isInteger(n) && Math.abs(n) >= 10000) return n.toString().replace(/\B(?=(\d{3})+(?!\d))/g, ",");
+  return String(n);
+}
+
 export function formatMeasurementRange(m: Pick<MeasurementSpec, "min" | "max" | "target" | "unit">): string {
   const u = m.unit;
   const sp = u === "%" ? "" : " ";
   let range: string;
-  if (m.min !== undefined && m.max !== undefined) range = `${m.min}–${m.max}${sp}${u}`;
-  else if (m.min !== undefined) range = `≥ ${m.min}${sp}${u}`;
-  else if (m.max !== undefined) range = `≤ ${m.max}${sp}${u}`;
+  if (m.min !== undefined && m.max !== undefined) range = `${fmtNum(m.min)}–${fmtNum(m.max)}${sp}${u}`;
+  else if (m.min !== undefined) range = `≥ ${fmtNum(m.min)}${sp}${u}`;
+  else if (m.max !== undefined) range = `≤ ${fmtNum(m.max)}${sp}${u}`;
   else range = "";
-  if (m.target !== undefined) range = range ? `${range} (target ${m.target})` : `target ${m.target}${sp}${u}`;
+  if (m.target !== undefined) range = range ? `${range} (target ${fmtNum(m.target)})` : `target ${fmtNum(m.target)}${sp}${u}`;
   return range || `(${u}, no range)`;
 }
 

@@ -1,0 +1,235 @@
+# DEMO CONTENT for voicelab development and testing. Not a validated protocol.
+# Standard recipe for 1 M Tris-HCl, pH 8.0 (500 mL). Concentrated hydrochloric
+# acid is corrosive and fuming. Read the SDS and follow local rules for real work.
+id: tris-buffer-prep
+title: 1 M Tris-HCl pH 8.0 (500 mL)
+version: "1.0"
+domain: buffer preparation
+summary: >
+  Prepare 500 mL of 1 M Tris-HCl, pH 8.0 from Tris base (MW 121.14 g/mol) and
+  concentrated HCl. Includes pH meter calibration and temperature control, because
+  Tris pH shifts by about 0.03 units per °C.
+ppe:
+  - Lab coat
+  - Nitrile gloves
+  - Chemical splash goggles
+  - Face shield when dispensing concentrated HCl
+equipment:
+  - Top-loading balance (0.01 g)
+  - 1 L beaker and magnetic stir bar
+  - Stir plate
+  - pH meter with a Tris-compatible (double-junction) electrode
+  - pH 7.00 and 10.00 calibration buffers
+  - 500 mL graduated cylinder or volumetric flask
+  - Fume hood
+  - Glass pipette or dropper for acid
+  - 0.22 µm bottle-top filter or autoclave
+reagents:
+  - id: tris-base
+    name: Tris base
+    aliases: [Tris, Trizma, Tris base, tris hydroxymethyl aminomethane, THAM]
+    molecularWeight: 121.14
+    hazards: [H315, H319, H335]
+    storage: Room temperature, tightly closed
+  - id: conc-hcl
+    name: Hydrochloric acid, concentrated (37%, about 12 M)
+    aliases: [HCl, hydrochloric acid, concentrated HCl, conc HCl, muriatic acid, acid]
+    stock: { value: 12, unit: M }
+    molecularWeight: 36.46
+    hazards: [H290, H314, H335]
+    storage: Acid cabinet, away from bases, bleach and oxidizers
+    notes: Fuming. Dispense only in the fume hood. Always add acid to water, never water to acid.
+  - id: hcl-1m
+    name: Hydrochloric acid, 1 M (for fine adjustment)
+    aliases: [1 M HCl, dilute HCl, one molar HCl]
+    stock: { value: 1, unit: M }
+    hazards: [H290]
+  - id: water
+    name: Deionized water (18.2 MΩ·cm)
+    aliases: [water, DI water, Milli-Q, MQ water, ddH2O]
+  - id: ph-buffers
+    name: pH calibration buffers (7.00 and 10.00)
+    aliases: [calibration buffers, pH buffers, pH 7 buffer, pH 10 buffer, standards]
+steps:
+  - id: calculate
+    title: Calculate the Tris mass
+    instruction: >
+      For 500 mL of 1 M Tris: mass = 1 mol/L × 0.5 L × 121.14 g/mol = 60.57 g. Ask the
+      assistant to run the molar calculator and confirm before weighing.
+    spoken: You need sixty point five seven grams of Tris base for five hundred mils at one molar. Want me to run the calculator?
+    reagents: [tris-base]
+  - id: weigh
+    title: Weigh Tris base
+    instruction: >
+      Tare a weigh boat on the top-loading balance and weigh 60.57 g of Tris base.
+      Record the actual mass.
+    spoken: Weigh out sixty point five seven grams of Tris base and tell me the actual mass.
+    reagents: [tris-base]
+    caution: Tris dust irritates eyes and airways. Scoop gently, and wipe up spills.
+    measurements:
+      - id: tris-mass
+        label: Tris base mass
+        unit: g
+        min: 60.47
+        max: 60.67
+        target: 60.57
+        outOfRangeHint: Adjust the mass on the balance. A 0.1 g error shifts the final concentration by about 0.2%.
+  - id: dissolve
+    title: Dissolve in 400 mL water
+    instruction: >
+      Add the Tris to a 1 L beaker containing about 400 mL deionized water (80% of the
+      final volume) with a stir bar. Stir until fully dissolved. Dissolving Tris is
+      endothermic, so let the solution return to room temperature (about 25 °C).
+    spoken: Dissolve the Tris in about four hundred mils of water with stirring, then let it come back to room temperature.
+    reagents: [tris-base, water]
+    measurements:
+      - id: solution-temp
+        label: Solution temperature
+        unit: °C
+        min: 20
+        max: 27
+        target: 25
+        outOfRangeHint: >
+          Tris pH changes about 0.03 units per °C. Let it equilibrate to room temperature
+          (or the temperature you'll use it at) before the final pH adjustment.
+  - id: calibrate
+    title: Calibrate the pH meter
+    critical: true
+    instruction: >
+      Calibrate with fresh pH 7.00 and 10.00 buffers at room temperature, rinsing the
+      electrode with deionized water and blotting between buffers. Use a Tris-compatible
+      double-junction electrode. Accept the calibration only if the slope is 95–105% and
+      the pH 7.00 buffer reads 6.98–7.02 afterwards.
+    spoken: Calibrate the pH meter with seven and ten buffers. Read me the slope and the pH seven check.
+    reagents: [ph-buffers, water]
+    measurements:
+      - id: electrode-slope
+        label: Electrode slope
+        unit: "%"
+        min: 95
+        max: 105
+        outOfRangeHint: >
+          A slope outside 95–105% means a dirty, dry or aging electrode, or old buffers.
+          Clean or rehydrate the electrode, use fresh buffers, and recalibrate.
+      - id: ph7-check
+        label: pH 7 buffer check
+        unit: pH
+        min: 6.98
+        max: 7.02
+        outOfRangeHint: Recalibrate. If it still fails, the reference junction may be clogged.
+    checks:
+      - Buffers within expiry and freshly poured
+      - Electrode rinsed between buffers
+  - id: adjust-ph
+    title: Adjust to pH 8.0 with HCl
+    critical: true
+    instruction: >
+      In the fume hood, with the solution stirring and the electrode immersed, slowly
+      add concentrated HCl (expect about 21 mL for 500 mL) with a glass pipette. The
+      solution warms, and warm Tris reads low, so stop at about pH 8.3, let it cool to
+      room temperature, then finish dropwise with 1 M HCl to pH 8.00.
+    spoken: In the hood, add concentrated HCl slowly while stirring. Stop around eight point three, let it cool, then finish with one molar HCl.
+    reagents: [conc-hcl, hcl-1m]
+    caution: >
+      Concentrated HCl causes severe burns and releases corrosive fumes. Fume hood,
+      goggles and face shield. Add acid to the solution, never water to the acid. If you
+      overshoot below pH 7.95, don't back-titrate with NaOH; it adds sodium chloride.
+      Remake the buffer, or record the deviation.
+    measurements:
+      - id: ph-adjusted
+        label: pH after adjustment
+        unit: pH
+        min: 7.95
+        max: 8.05
+        target: 8
+        outOfRangeHint: >
+          Above 8.05, add 1 M HCl one drop at a time. Below 7.95 you've overshot. Don't add
+          NaOH; remake the buffer or record the deviation.
+    checks:
+      - Solution back at room temperature before the final reading
+  - id: volume
+    title: Bring to 500 mL and re-check pH
+    instruction: >
+      Transfer to a 500 mL graduated cylinder or volumetric flask, rinse the beaker into
+      it, and bring to 500 mL with deionized water. Mix well and re-check the pH.
+    spoken: Bring it to five hundred mils with water, mix, and read me the final pH.
+    reagents: [water]
+    measurements:
+      - id: final-ph
+        label: Final pH
+        unit: pH
+        min: 7.9
+        max: 8.1
+        target: 8
+        outOfRangeHint: >
+          A pH that drifted after bringing to volume usually means a temperature difference
+          or a poorly equilibrated electrode. Re-check at 25 °C.
+  - id: sterilize
+    title: Filter or autoclave
+    instruction: >
+      Filter through a 0.22 µm bottle-top filter into a sterile bottle, or autoclave
+      for 20 minutes at 121 °C with the cap loosened.
+    spoken: Filter sterilize it, or autoclave for twenty minutes with the cap loose.
+    caution: Never autoclave a tightly capped bottle. Use heat-resistant gloves when unloading.
+    timer: { seconds: 1200, label: Autoclave cycle }
+  - id: label-store
+    title: Label and store
+    instruction: >
+      Label with contents (1 M Tris-HCl), pH and the temperature it was set at, date,
+      your initials, and the SOP version. Store at room temperature.
+    spoken: Label it with the name, pH and temperature, date and your initials. Store it at room temperature.
+    checks:
+      - Label includes the pH temperature
+troubleshooting:
+  - symptom: pH keeps drifting after adjustment
+    likelyCauses:
+      - Solution not at room temperature yet (Tris is temperature-sensitive)
+      - Single-junction Ag/AgCl electrode reacting with Tris
+      - Electrode not equilibrated
+    actions:
+      - Wait until the solution is at 25 °C
+      - Use a double-junction, Tris-compatible electrode
+      - Give each reading 30–60 seconds to stabilize
+    relatedSteps: [dissolve, calibrate, adjust-ph]
+  - symptom: Calibration slope out of range
+    likelyCauses:
+      - Old or contaminated calibration buffers
+      - Dirty or dried-out electrode
+    actions:
+      - Pour fresh buffers
+      - Clean the electrode with its cleaning solution and soak in storage solution
+      - Recalibrate
+    relatedSteps: [calibrate]
+  - symptom: Overshot the pH (too low)
+    likelyCauses:
+      - Concentrated HCl added too fast near the endpoint
+      - Final adjustment made while the solution was still warm
+    actions:
+      - Don't back-titrate with NaOH
+      - Remake the buffer, or record the actual pH as a deviation
+      - Switch to 1 M HCl near pH 8.3
+    relatedSteps: [adjust-ph]
+  - symptom: Tris won't dissolve
+    likelyCauses:
+      - Too little water
+      - Solution too cold
+    actions:
+      - Keep stirring; Tris dissolves slowly at high concentration
+      - Let it warm to room temperature
+    relatedSteps: [dissolve]
+  - symptom: Solution turned yellow after autoclaving
+    likelyCauses:
+      - Trace impurities in the Tris
+      - Over-long autoclave cycle
+    actions:
+      - Slight yellowing is usually harmless for most uses
+      - Filter sterilize instead next time
+    relatedSteps: [sterilize]
+waste: >
+  Rinse water and small neutralized acid residues may go to the drain with plenty of
+  water if local rules allow. Collect concentrated HCl residues and spills (after
+  neutralizing with sodium bicarbonate) as acid waste. Never put acid waste in a
+  container with bleach.
+references:
+  - Sambrook & Russell, Molecular Cloning, Appendix 1 (Tris buffers)
+  - Concentrated hydrochloric acid SDS

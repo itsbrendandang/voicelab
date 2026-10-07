@@ -683,7 +683,7 @@ export function unitConversion(input: { quantity: Quantity; toUnit: string; mole
   const to = convertImpl(from, input.toUnit, input.molecularWeight ? { molecularWeight: input.molecularWeight } : undefined);
   const working = [`${formatQuantityExact(from)} = ${formatQuantityExact(to)}`];
   if (input.molecularWeight && unitDef(from.unit).dim !== unitDef(input.toUnit).dim) {
-    working.unshift(`Using MW = ${formatNumber(input.molecularWeight)} g/mol`);
+    working.unshift(`Using MW = ${formatNumber(input.molecularWeight, 7)} g/mol`);
   }
   return {
     kind: "unit-conversion",

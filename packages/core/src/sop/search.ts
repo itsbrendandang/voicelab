@@ -35,6 +35,12 @@ const EXPANSION_WORDS: Record<string, string[]> = {
   fix: ["actions", "causes"],
   wrong: ["causes", "actions"],
   problem: ["causes", "actions"],
+  come: ["detach"],
+  lift: ["detach"],
+  stuck: ["detach", "attached"],
+  attached: ["detach"],
+  dead: ["viability"],
+  dying: ["viability"],
 };
 
 const EXPANSIONS: Record<string, string[]> = {};
@@ -64,7 +70,7 @@ function makeDoc(kind: SearchDoc["kind"], ref: string, title: string, text: stri
   const tf = new Map<string, number>();
   let length = 0;
   for (const [t, w] of fields) length += addField(tf, t, w);
-  return { kind, ref, title, text, tf, length };
+  return { kind, ref, title: title.replace(/\s+/g, " ").trim(), text: text.replace(/\s+/g, " ").trim(), tf, length };
 }
 
 const cache = new WeakMap<Sop, SopIndex>();

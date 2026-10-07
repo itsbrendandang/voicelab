@@ -148,6 +148,11 @@ function capitalize(s: string): string {
   return s.charAt(0).toUpperCase() + s.slice(1);
 }
 
+/** Lowercase a leading capital for mid-sentence use, but keep acronyms ("HCl", "PPE"). */
+function lowerFirst(s: string): string {
+  return /^[A-Z][a-z]/.test(s) ? s.charAt(0).toLowerCase() + s.slice(1) : s;
+}
+
 // ------------------------------------------------------------------ screenUtterance
 
 /** Verbs and phrasings that mean two things are about to end up together. */
@@ -467,8 +472,8 @@ export function screenUtterance(text: string, ctx?: { sop?: Sop; currentStepId?:
         const statements = [...new Set(severe)]
           .sort((a, b) => hazardSeverity(b) - hazardSeverity(a))
           .slice(0, 2)
-          .map((c) => lookupGhs(c)?.statement.toLowerCase() ?? c);
-        const ppe = sop?.ppe.length ? ` Use ${joinSpoken(sop.ppe.slice(0, 3).map((p) => p.toLowerCase()))}.` : "";
+          .map((c) => lowerFirst(lookupGhs(c)?.statement ?? c));
+        const ppe = sop?.ppe.length ? ` Use ${joinSpoken(sop.ppe.slice(0, 3).map(lowerFirst))}.` : "";
         set.add({
           ruleId: `reagent:${r.id}`,
           level: acuteOrCmr ? "warning" : "info",
@@ -534,10 +539,10 @@ function summarize(name: string, codes: string[], basePpe: string[], baseNotes: 
   if (hazards.length) {
     const top = hazards.slice(0, 3).map((h) => h.statement.replace(/\.$/, ""));
     const said = top.map((s, i) => (i === 0 ? s : s.charAt(0).toLowerCase() + s.slice(1)));
-    const ppeShort = ppe.slice(0, 4).map((p) => p.toLowerCase());
+    const ppeShort = ppe.slice(0, 4).map(lowerFirst);
     spoken = `${name}: ${signal}. ${said.join("; ")}.${ppeShort.length ? ` Use ${joinSpoken(ppeShort)}.` : ""}`;
   } else {
-    spoken = `${name} has no GHS hazard statements listed.${ppe.length ? ` Standard PPE: ${joinSpoken(ppe.slice(0, 3).map((p) => p.toLowerCase()))}.` : ""}`;
+    spoken = `${name} has no GHS hazard statements listed.${ppe.length ? ` Standard PPE: ${joinSpoken(ppe.slice(0, 3).map(lowerFirst))}.` : ""}`;
   }
   return { name, hazards, ppe, notes: allNotes, spoken };
 }
