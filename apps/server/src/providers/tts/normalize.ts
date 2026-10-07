@@ -192,7 +192,13 @@ export function normalizeForSpeech(input: string): string {
   t = t.replace(STANDALONE_RE, (_m, pre: string, unit: string) => `${pre}${UNITS[unit]?.many ?? unit}`);
   t = t.replace(/µ/g, "micro");
 
-  // Leftover markdown-ish symbols and whitespace
+  // Line breaks become sentence pauses; then tidy leftover symbols and whitespace.
+  t = t
+    .split(/\n+/)
+    .map((l) => l.trim())
+    .filter(Boolean)
+    .map((l, i, all) => (i < all.length - 1 && !/[.!?:;,]$/.test(l) ? `${l}.` : l))
+    .join(" ");
   t = t.replace(/[*#]+/g, " ").replace(/\s+([,.;:!?])/g, "$1").replace(/\s{2,}/g, " ");
   return t.trim();
 }

@@ -105,7 +105,9 @@ export class ConfigError extends Error {
 }
 
 export function loadConfig(env: Record<string, string | undefined> = process.env): AppConfig {
-  const parsed = EnvSchema.safeParse(env);
+  // `KEY=` in a copied .env means "unset", so blank values fall back to defaults.
+  const cleaned = Object.fromEntries(Object.entries(env).filter(([, v]) => v !== undefined && v.trim() !== ""));
+  const parsed = EnvSchema.safeParse(cleaned);
   if (!parsed.success) {
     const issues = parsed.error.issues.map((i) => `${i.path.join(".")}: ${i.message}`);
     throw new ConfigError(`Invalid environment: ${issues.join("; ")}`, issues);
