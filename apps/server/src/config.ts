@@ -55,7 +55,7 @@ const EnvSchema = z.object({
   VOICELAB_SOP_DIR: optionalString,
   VOICELAB_DATA_DIR: optionalString,
   VOICELAB_WEB_DIST: optionalString,
-  /** Serve apps/web/dist even outside NODE_ENV=production (if it exists). */
+  /** Serve apps/web/dist from this server: auto (if a build exists) | true | false. */
   VOICELAB_SERVE_WEB: z
     .enum(["auto", "true", "false"])
     .default("auto"),
@@ -167,7 +167,8 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
     port: e.PORT,
     host: e.HOST,
     production,
-    serveWeb: e.VOICELAB_SERVE_WEB === "true" || (e.VOICELAB_SERVE_WEB === "auto" && production),
+    // "auto": serve apps/web/dist whenever a build exists (app.ts checks), so `npm run build && npm start` just works.
+    serveWeb: e.VOICELAB_SERVE_WEB !== "false",
     sopDir: e.VOICELAB_SOP_DIR ? resolve(e.VOICELAB_SOP_DIR) : DEFAULT_SOP_DIR,
     dataDir: e.VOICELAB_DATA_DIR ? resolve(e.VOICELAB_DATA_DIR) : DEFAULT_DATA_DIR,
     webDist: e.VOICELAB_WEB_DIST ? resolve(e.VOICELAB_WEB_DIST) : DEFAULT_WEB_DIST,

@@ -787,10 +787,49 @@ select {
   margin-top: 4px;
   max-width: 75ch;
 }
+.pinned-alert-row {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto auto;
+  align-items: center;
+  gap: 12px;
+  padding: 6px 20px 6px 30px;
+  background: var(--danger-banner-edge);
+  color: #ffffff;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.25);
+  font-weight: 700;
+}
+.pinned-alert-row-title {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.pinned-alert-row-time {
+  font-size: 0.85rem;
+  font-weight: 500;
+  opacity: 0.9;
+}
+.btn-ack.btn-ack-sm {
+  min-height: 48px;
+  padding: 6px 14px;
+  font-size: 0.95rem;
+}
 @media (max-width: 640px) {
   .pinned-alert {
     grid-template-columns: auto minmax(0, 1fr);
+    padding: 12px 14px 12px 24px;
+  }
+  .pinned-alert-title {
+    font-size: 1.2rem;
+  }
+  .pinned-alert-message {
+    font-size: 1rem;
+  }
+  .pinned-alert-row {
+    grid-template-columns: auto minmax(0, 1fr) auto;
     padding-left: 24px;
+  }
+  .pinned-alert-row-time {
+    display: none;
   }
   .pinned-alert .btn-ack {
     grid-column: 1 / -1;
@@ -1690,7 +1729,7 @@ details[open] > summary::after {
 
 .run-stats {
   display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(92px, 1fr));
   gap: 8px;
   margin: 0 0 8px;
 }
@@ -1706,8 +1745,9 @@ details[open] > summary::after {
   min-height: 2.3em;
   color: var(--muted);
   text-transform: uppercase;
-  letter-spacing: 0.04em;
-  overflow-wrap: anywhere;
+  letter-spacing: 0.03em;
+  overflow-wrap: normal;
+  hyphens: manual;
 }
 .run-stats dd {
   margin: 0;

@@ -21,31 +21,49 @@ interface PinnedProps {
 }
 
 /**
- * Danger alerts: full-width red banners pinned above everything until the
- * operator acknowledges. The container is always mounted so the assertive live
- * region is registered before the first alert lands.
+ * Danger alerts: a full-width red banner pinned above everything until the
+ * operator acknowledges. Only the newest is shown in full; older unacknowledged
+ * ones collapse to one-line rows so a burst of alerts never buries the bench
+ * view. The container is always mounted so the assertive live region is
+ * registered before the first alert lands.
  */
 export function PinnedAlerts({ alerts, onAck }: PinnedProps) {
+  const newestFirst = [...alerts].reverse();
+  const latest = newestFirst[0];
+  const older = newestFirst.slice(1);
   return (
     <div className="pinned-alerts" aria-live="assertive" aria-relevant="additions">
-      {alerts.map(({ alert }) => (
-        <section key={alert.id} className={`pinned-alert level-${alert.level}`} role="alert" aria-labelledby={`alert-${alert.id}`}>
-          <div className="pinned-alert-icon">{alert.source === "safety-rule" ? <ShieldIcon size={36} /> : <AlertIcon size={36} />}</div>
+      {latest && (
+        <section key={latest.alert.id} className={`pinned-alert level-${latest.alert.level}`} role="alert" aria-labelledby={`alert-${latest.alert.id}`}>
+          <div className="pinned-alert-icon">{latest.alert.source === "safety-rule" ? <ShieldIcon size={36} /> : <AlertIcon size={36} />}</div>
           <div className="pinned-alert-body">
             <div className="pinned-alert-meta">
-              <span className="pill">{alert.level === "danger" ? "DANGER" : alert.level.toUpperCase()}</span>
-              <span>{SOURCE_LABEL[alert.source]}</span>
-              <span>{formatClockTime(alert.at)}</span>
+              <span className="pill">{latest.alert.level === "danger" ? "DANGER" : latest.alert.level.toUpperCase()}</span>
+              <span>{SOURCE_LABEL[latest.alert.source]}</span>
+              <span>{formatClockTime(latest.alert.at)}</span>
+              {older.length > 0 && <span>+{older.length} more below</span>}
             </div>
-            <h2 id={`alert-${alert.id}`} className="pinned-alert-title">
-              {alert.title}
+            <h2 id={`alert-${latest.alert.id}`} className="pinned-alert-title">
+              {latest.alert.title}
             </h2>
-            <p className="pinned-alert-message">{alert.message}</p>
+            <p className="pinned-alert-message">{latest.alert.message}</p>
           </div>
-          <button type="button" className="btn btn-ack" onClick={() => onAck(alert.id)}>
+          <button type="button" className="btn btn-ack" onClick={() => onAck(latest.alert.id)}>
             Acknowledge
           </button>
         </section>
+      )}
+      {older.map(({ alert }) => (
+        <div key={alert.id} className="pinned-alert-row">
+          {alert.source === "safety-rule" ? <ShieldIcon size={20} /> : <AlertIcon size={20} />}
+          <span className="pinned-alert-row-title" title={alert.message}>
+            {alert.title}
+          </span>
+          <span className="pinned-alert-row-time">{formatClockTime(alert.at)}</span>
+          <button type="button" className="btn btn-ack btn-ack-sm" onClick={() => onAck(alert.id)} aria-label={`Acknowledge: ${alert.title}`}>
+            Acknowledge
+          </button>
+        </div>
       ))}
     </div>
   );

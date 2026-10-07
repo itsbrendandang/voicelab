@@ -67,8 +67,12 @@ flowchart LR
    `<bench_state>` block in the user message (current step, recent readings,
    timers, open deviations). It streams text and calls tools. All arithmetic
    goes through calculator tools, and their `spoken` strings are what gets said.
-6. **Speak.** Text deltas are cut into sentences and streamed into TTS. The
-   first audio starts after the first sentence instead of the full reply.
+6. **Check numbers, then speak.** Text deltas are cut into sentences. Before a
+   sentence goes to TTS, every number in it is checked against what can back
+   it: tool inputs and outputs, the SOP, run events, and what the operator said
+   (allowing unit rescaling and rounding). An unbacked number raises a
+   "Check this number" warning and adds a spoken caveat at the end of the turn.
+   The first audio starts after the first sentence instead of the full reply.
    PCM is sent as binary frames between `tts.start` / `tts.end`.
 7. **Barge-in.** If the operator talks over the assistant (client-side RMS
    detection) or presses Stop, the client sends `interrupt`. The server aborts
@@ -90,6 +94,11 @@ speech models are lower latency but make all of these harder. See
 return a display `summary`, a TTS-ready `spoken` phrase, the `working`, and
 practical warnings (sub-microliter volumes, pipette choice). The UI shows the
 working so the scientist can verify before pipetting.
+
+**Number provenance as a backstop.** Claude Opus 5.5 can't be forced to call
+a tool (`tool_choice: any` returns a 400), so "numbers only from tools" is a
+prompt instruction plus a server-side check (`apps/server/src/agent/provenance.ts`),
+not a guarantee from the model.
 
 **Structured SOPs.** Plain-text SOPs can't tell you that an A595 of 1.9 is out
 of range. The YAML schema adds expected measurement ranges, hazards (GHS codes),

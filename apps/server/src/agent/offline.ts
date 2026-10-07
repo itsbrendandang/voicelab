@@ -88,7 +88,7 @@ function stepSpeech(sop: Sop, step: Step): string {
   const parts = [`Step ${stepNumber(sop, step.id)}: ${step.spoken ?? step.instruction}`];
   if (step.critical) parts.push("This is a critical step.");
   if (step.caution) parts.push(`Caution: ${step.caution}`);
-  if (step.timer) parts.push(`It has a ${speakDuration(step.timer.seconds)} timer; say start the timer when you're ready.`);
+  if (step.timer) parts.push(`There's a timer for ${speakDuration(step.timer.seconds)}; say start the timer when you're ready.`);
   return parts.map((p) => (/[.!?]$/.test(p) ? p : `${p}.`)).join(" ");
 }
 
@@ -145,6 +145,9 @@ export class OfflineAgent implements LabAgent {
     const wasAwaiting = this.awaitingConfirmation;
     this.awaitingConfirmation = false;
 
+    // The session already raised and spoke the deterministic safety alert; add nothing that could distract from it.
+    if (opts.context?.safetyFindings?.some((f) => f.level === "danger")) return "";
+
     // ---- stop words / acknowledgements (barge-in already silenced playback)
     if (/^(stop|quiet|silence|shut up|never ?mind|cancel|be quiet|hold on|wait|pause)[.!]*$/i.test(lower)) return "";
     if (/^(ok(ay)?|thanks?( you)?|got it|great|cool|perfect)[.!]*$/i.test(lower)) return wasAwaiting ? "Say confirmed when the critical step is done." : "Sure.";
@@ -154,6 +157,9 @@ export class OfflineAgent implements LabAgent {
       return this.complete(opts, true);
     }
     if (/\bconfirm(ed)?\b.*\bstep\b|\bstep\b.*\bconfirm(ed)?\b/.test(lower)) return this.complete(opts, true);
+    if (/^(confirm(ed)?|i confirm|all checks? (done|confirmed))[.!]*$/i.test(lower)) {
+      return this.ctx.run.currentStep()?.critical ? this.complete(opts, true) : "There's nothing waiting for confirmation right now.";
+    }
 
     // ---- safety: incompatibility
     const mix = /\b(?:can i|is it (?:ok|okay|safe) to|should i) (?:mix|combine|add|pour)\s+(.+?)\s+(?:and|with|into|to)\s+(.+?)[?.!]*$/i.exec(text);
@@ -210,7 +216,7 @@ export class OfflineAgent implements LabAgent {
       const exec = this.tool(opts, "start_timer", input);
       if (!exec.ok) return exec.error ?? "I couldn't start a timer.";
       const out = exec.output as { label: string; duration: string };
-      return `Started a ${out.duration} timer for ${out.label}.`;
+      return `Timer started: ${out.duration} for ${out.label.replace(/\s+timer$/i, "")}.`;
     }
 
     // ---- calculations
@@ -218,15 +224,17 @@ export class OfflineAgent implements LabAgent {
     const volumes = qs.filter((x) => x.kind === "volume");
     const concs = qs.filter((x) => x.kind === "molar" || x.kind === "massConc" || x.kind === "fold");
     const fromIdx = lower.search(/\bfrom\b/);
-    if ((/\bdilut/i.test(lower) || (fromIdx >= 0 && /\bstock\b/i.test(lower))) && concs.length >= 2 && volumes.length >= 1) {
+    const stockIdx = lower.search(/\bstock\b/);
+    if ((/\bdilut/i.test(lower) || stockIdx >= 0 || /\bhow much\b/.test(lower)) && concs.length >= 2 && volumes.length >= 1) {
       let stock = concs[0]!;
       let final = concs[1]!;
-      if (fromIdx >= 0) {
-        const after = concs.find((c) => c.index > fromIdx);
-        if (after) {
-          stock = after;
-          final = concs.find((c) => c !== after)!;
-        }
+      // "from the 10 mM ..." names the stock after "from"; "the 2 mg/mL BSA stock" names it just before "stock".
+      const afterFrom = fromIdx >= 0 ? concs.find((c) => c.index > fromIdx) : undefined;
+      const beforeStock = stockIdx >= 0 ? [...concs].reverse().find((c) => c.index < stockIdx && stockIdx - c.end <= 30) : undefined;
+      const named = afterFrom ?? beforeStock;
+      if (named) {
+        stock = named;
+        final = concs.find((c) => c !== named)!;
       }
       const exec = this.tool(opts, "calc_dilution", {
         stock_concentration: stock.raw,
@@ -313,7 +321,10 @@ export class OfflineAgent implements LabAgent {
       if (this.lastReply) return this.lastReply;
       return this.stepReply(this.tool(opts, "get_current_step", {}));
     }
-    if (/\b(?:(?:what|which) step|where am i|current step|read (?:me )?(?:the )?step|what do i do|what now|what should i do)\b/i.test(lower)) {
+    if (
+      /\b(?:(?:what|which) step|where am i|current step|read (?:me )?(?:the )?step)\b/i.test(lower) ||
+      /^(?:so |ok(?:ay)? )?(?:what do i do|what should i do|what now|now what)(?: now| here| next)?[?.!]*$/i.test(lower)
+    ) {
       return this.stepReply(this.tool(opts, "get_current_step", {}));
     }
     if (/\b(next|done|finished|complete[d]?|move on|ready for the next|that's it|all set)\b/i.test(lower)) {
@@ -363,21 +374,35 @@ export class OfflineAgent implements LabAgent {
 
   private parseReading(text: string): Record<string, unknown> | undefined {
     const LABEL = String.raw`(absorbance|a ?\d{3}|od ?\d{0,3}|optical density|ph|temperature|temp|concentration|reading|volume|weight|mass|cell count|count|conductivity|viability)`;
-    const re = new RegExp(String.raw`\b${LABEL}\b(?:\s+(?:is|was|reads|read|of|at|equals|came out(?: at)?|measured))*\s*[:=]?\s*(?:about\s+|around\s+)?(-?\d+(?:\.\d+)?)\s*([µuμ]?[A-Za-z/%°]+)?`, "i");
+    // Optional qualifier between label and value: "absorbance of the blank is 1.9", "pH for sample 2 was 7.4".
+    const QUAL = String.raw`(?:\s+(?:of|for|in|on)\s+(?:the\s+)?([a-z][\w-]*(?:\s+[\w-]+)?))?`;
+    const re = new RegExp(String.raw`\b${LABEL}\b${QUAL}(?:\s+(?:is|was|reads|read|of|at|equals|came out(?: at)?|measured))*\s*[:=]?\s*(?:about\s+|around\s+)?(-?\d+(?:\.\d+)?)\s*([µuμ]?[A-Za-z/%°]+)?`, "i");
     const m = re.exec(text);
     const generic = m ? undefined : /\b(?:it (?:reads|is|was)|it's|i got|reading of|measured)\s+(-?\d+(?:\.\d+)?)\s*([µuμ]?[A-Za-z/%°]+)?/i.exec(text);
     if (!m && !generic) return undefined;
     const label = m ? m[1]!.toLowerCase().replace(/\s+/g, "") : undefined;
-    const value = Number(m ? m[2] : generic![1]);
+    const qualifier = m?.[2]?.trim().toLowerCase();
+    const value = Number(m ? m[3] : generic![1]);
     if (!Number.isFinite(value)) return undefined;
-    let unit = (m ? m[3] : generic![2])?.trim();
+    let unit = (m ? m[4] : generic![2])?.trim();
     if (unit && /^(and|at|in|on|for|the|so|but|which)$/i.test(unit)) unit = undefined;
 
     const step = this.ctx.run.currentStep();
     const specs = step?.measurements ?? [];
-    const spec =
-      (label && specs.find((s) => s.id.toLowerCase() === label || s.label.toLowerCase().replace(/\s+/g, "").includes(label) || label.includes(s.label.toLowerCase().replace(/\s+/g, "")))) ||
-      (specs.length === 1 ? specs[0] : undefined);
+    const norm = (x: string) => x.toLowerCase().replace(/\s+/g, "");
+    // A labelled reading only binds to a matching spec on this step; otherwise core
+    // matches the label across the SOP. Only an unlabelled reading ("it reads 0.4")
+    // falls back to the step's single spec.
+    const matchesQualifier = (s: { id: string; label: string }) => !qualifier || norm(s.label).includes(norm(qualifier)) || norm(s.id).includes(norm(qualifier));
+    const spec = label
+      ? specs.find(
+          (s) =>
+            matchesQualifier(s) &&
+            (norm(s.id) === label || norm(s.label).includes(label) || label.includes(norm(s.label)) || (label === "ph" && norm(s.unit) === "ph")),
+        )
+      : specs.length === 1
+        ? specs[0]
+        : undefined;
     if (!unit) {
       if (spec) unit = spec.unit;
       else if (label && /^(absorbance|a\d{3}|od\d*|opticaldensity)$/.test(label)) unit = "AU";
@@ -385,7 +410,9 @@ export class OfflineAgent implements LabAgent {
       else if (label === "temperature" || label === "temp") unit = "°C";
       else unit = "units";
     }
-    const prettyLabel = label === "ph" ? "pH" : label?.startsWith("od") ? label.toUpperCase() : label && /^a\d{3}$/.test(label) ? label.toUpperCase() : label;
+    const baseLabel = label === "ph" ? "pH" : label?.startsWith("od") ? label.toUpperCase() : label && /^a\d{3}$/.test(label) ? label.toUpperCase() : label;
+    // Put the qualifier first ("blank absorbance") so core's label matcher can tell specs apart.
+    const prettyLabel = baseLabel && qualifier ? `${qualifier} ${baseLabel}` : baseLabel;
     return { value, unit, ...(spec ? { spec_id: spec.id, label: spec.label } : prettyLabel ? { label: prettyLabel } : {}) };
   }
 

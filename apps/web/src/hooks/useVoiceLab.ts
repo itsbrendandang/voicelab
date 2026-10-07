@@ -72,7 +72,7 @@ export function useVoiceLab(opts: UseVoiceLabOptions): VoiceLabApi {
   const sendText = useCallback((text: string, source: "typed" | "browser-stt") => {
     const trimmed = text.trim();
     if (!trimmed) return false;
-    const ok = socketRef.current?.send({ type: "user.text", text: trimmed }) ?? false;
+    const ok = socketRef.current?.send({ type: "user.text", text: trimmed, source: source === "typed" ? "typed" : "speech" }) ?? false;
     if (ok) dispatch({ type: "user/text", text: trimmed, source, at: Date.now() });
     return ok;
   }, []);

@@ -46,14 +46,20 @@ export interface ProviderInfo {
 export type ClientMessage =
   | { type: "session.start"; protocol: number; config: SessionConfig; sopId?: string }
   | { type: "session.config"; config: Partial<SessionConfig> }
-  /** Typed input, or a final transcript produced by browser STT. */
-  | { type: "user.text"; text: string }
+  /**
+   * Typed input, or a final transcript produced by browser STT. `source` lets the
+   * server apply the wake phrase to speech only; when omitted, the server assumes
+   * speech if the session uses browser STT, typed otherwise.
+   */
+  | { type: "user.text"; text: string; source?: "typed" | "speech" }
   | { type: "ptt"; state: "down" | "up" }
   /** Barge-in: stop speaking and abandon the in-flight assistant turn. */
   | { type: "interrupt" }
   | { type: "sop.select"; sopId: string }
   | { type: "step.goto"; stepId: string }
   | { type: "step.complete" }
+  /** Start a timer from the UI. Without `seconds`, starts the current step's SOP timer. */
+  | { type: "timer.start"; seconds?: number; label?: string }
   | { type: "timer.cancel"; timerId: string }
   | { type: "alert.ack"; alertId: string }
   | { type: "report.request" }

@@ -7,7 +7,7 @@ import { useVoiceLab } from "./hooks/useVoiceLab";
 import { prefsToConfig, usePrefs } from "./hooks/usePrefs";
 import { usePttKeyboard } from "./hooks/usePttKeyboard";
 import { useSopDetail } from "./hooks/useSopDetail";
-import { downloadText, formatDurationShort, reportFilename } from "./lib/format";
+import { downloadText, reportFilename } from "./lib/format";
 import { pinnedAlerts, toastAlerts } from "./state/reducer";
 import { Header } from "./components/Header";
 import { SettingsPanel } from "./components/SettingsPanel";
@@ -146,8 +146,7 @@ export function App() {
   const startStepTimer = useCallback(
     (step: Step) => {
       if (!step.timer) return;
-      // No `timer.start` client message exists; ask the agent in words (same path as speech).
-      api.sendText(`Start the ${step.timer.label} timer for ${formatDurationShort(step.timer.seconds)}.`, "typed");
+      api.send({ type: "timer.start", seconds: step.timer.seconds, label: step.timer.label });
     },
     [api],
   );

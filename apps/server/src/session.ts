@@ -41,6 +41,7 @@ import { AsyncQueue } from "./util/async-queue";
 import { AgentUnavailableError, type LabAgent, type RunTurnOptions } from "./agent/types";
 import { OfflineAgent } from "./agent/offline";
 import { executeTool, type ToolContext } from "./agent/tools";
+import { NumberProvenance } from "./agent/provenance";
 import type { AgentFactory } from "./agent";
 
 export interface SessionTransport {
@@ -140,6 +141,8 @@ export class Session {
   private pendingAcks = new Map<string, Alert>();
   private unsubscribe: (() => void) | undefined;
   private ttsDisabled = false;
+  /** Numbers the assistant may speak without a caveat: SOP, tool I/O, readings, the operator's words. */
+  private provenance = new NumberProvenance();
   private readonly log: Logger | undefined;
 
   constructor(
@@ -242,7 +245,7 @@ export class Session {
         return;
       }
       case "user.text":
-        await this.handleUtterance(m.text, "typed");
+        await this.handleUtterance(m.text, m.source ?? (this.cfg.stt === "browser" ? "speech" : "typed"));
         return;
       case "ptt":
         if (m.state === "down") {
@@ -285,6 +288,14 @@ export class Session {
         }
         run.completeCurrentStep();
         return;
+      case "timer.start": {
+        const input: Record<string, unknown> = {};
+        if (m.seconds !== undefined) input.seconds = m.seconds;
+        if (m.label) input.label = m.label;
+        const exec = executeTool("start_timer", input, this.toolCtx());
+        if (!exec.ok) this.send({ type: "error", message: exec.error ?? "Could not start the timer" });
+        return;
+      }
       case "timer.cancel": {
         const t = run.state.timers.find((x) => x.id === m.timerId && x.status === "running");
         if (!t) {
@@ -447,9 +458,8 @@ export class Session {
   private gate(text: string, source: "speech" | "typed"): GateResult {
     const wake = this.cfg.wakePhrase;
     if (this.cfg.listen !== "handsfree" || !wake) return { kind: "pass", text };
-    // Typed input is always addressed to the assistant — unless browser STT is
-    // delivering its transcripts through user.text (protocol can't tell them apart).
-    if (source === "typed" && this.cfg.stt !== "browser") return { kind: "pass", text };
+    // Typed input is always addressed to the assistant.
+    if (source === "typed") return { kind: "pass", text };
     const rest = matchWakePhrase(text, wake);
     if (rest === undefined) {
       if (Date.now() <= this.armedUntil) {
@@ -473,6 +483,7 @@ export class Session {
     const run = this.run;
     if (!run) return;
     const seq = ++this.utteranceSeq;
+    this.provenance.add(raw);
 
     // 1. Deterministic safety screen — always, before anything else.
     let findings: SafetyFinding[] = [];
@@ -533,8 +544,26 @@ export class Session {
     this.thinking = true;
     this.updateStatus();
 
+    let unbackedSeen = false;
+    const checkNumbers = (sentence: string) => {
+      const bad = this.provenance.unbacked(sentence);
+      if (!bad.length) return;
+      unbackedSeen = true;
+      const list = [...new Set(bad.map((b) => b.raw))].join(", ");
+      this.log?.warn(`unbacked number(s) ${list} in reply: "${sentence}"`);
+      const alert = this.raiseAlert({
+        level: "warning",
+        title: "Check this number",
+        message: `The assistant said ${list} without a calculation, SOP entry or reading behind it. Verify before you use it.`,
+        source: "agent",
+        requiresAck: false,
+      });
+      run.append({ type: "safety.alert", at: alert.at, alertId: alert.id, level: alert.level, title: alert.title, message: alert.message });
+    };
+
     const emitSentence = (sentence: string) => {
       if (abort.signal.aborted) return;
+      checkNumbers(sentence);
       if (job) job.queue.push(sentence);
       else if (this.cfg.tts === "browser" || (this.cfg.tts === "server" && !this.deps.tts)) {
         const spoken = normalizeForSpeech(sentence);
@@ -552,9 +581,13 @@ export class Session {
         for (const s of chunker.push(delta)) emitSentence(s);
       },
       onToolCall: (call) => {
+        this.provenance.add(call.input);
         this.send({ type: "tool", trace: { id: call.id, turnId, name: call.name, input: call.input } });
       },
       onToolResult: (r) => {
+        this.provenance.add(r.input);
+        this.provenance.add(r.output);
+        if (r.calc) this.provenance.add(r.calc);
         this.send({ type: "tool", trace: { id: r.id, turnId, name: r.name, input: r.input, output: r.output, isError: r.isError, ms: r.ms } });
         if (r.calc && !r.isError) {
           this.send({ type: "calc", turnId, result: r.calc });
@@ -586,6 +619,12 @@ export class Session {
     if (!abort.signal.aborted) {
       const rest = chunker.flush();
       if (rest) emitSentence(rest);
+      if (unbackedSeen) {
+        const caveat = " Please double-check that number; it didn't come from a calculation or the SOP.";
+        turn.text += caveat;
+        this.send({ type: "assistant.delta", turnId, text: caveat });
+        emitSentence(caveat.trim());
+      }
     }
     job?.queue.close();
     const interrupted = abort.signal.aborted;
@@ -722,6 +761,16 @@ export class Session {
 
   private onRunEvent(event: LabEvent, state: ExperimentState): void {
     this.deps.events?.append(this.runId, event);
+    if (event.type === "run.started") {
+      this.provenance = new NumberProvenance();
+      const sop = this.run?.sop;
+      if (sop) {
+        this.provenance.add(sop);
+        this.provenance.add(sop.steps.map((_, i) => i + 1));
+      }
+    } else {
+      this.provenance.add(event);
+    }
     switch (event.type) {
       case "timer.started":
         this.scheduleTimer(event.timer);
