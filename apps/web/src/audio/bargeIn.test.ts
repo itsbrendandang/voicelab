@@ -46,6 +46,17 @@ describe("BargeInDetector", () => {
     expect(run(d, 0.15, 1000, true, 21_000)).not.toBeNull();
   });
 
+  it("never fires on, or learns from, protected (urgent) assistant audio", () => {
+    const d = new BargeInDetector({ threshold: 0.05 });
+    const floor = d.floor;
+    // Loud echo of an urgent alert for 2 s: no barge-in, and the noise floor is not raised by it.
+    for (let t = 0; t < 2000; t += 20) expect(d.update(0.3, t, true, false)).toBe(false);
+    expect(d.floor).toBe(floor);
+    // Hold time does not carry over from protected audio into the normal reply that follows.
+    expect(d.update(0.3, 2000, true, true)).toBe(false);
+    expect(run(d, 0.3, 1000, true, 2020)).not.toBeNull();
+  });
+
   it("tolerates brief dips inside a word", () => {
     const d = new BargeInDetector({ threshold: 0.05, graceMs: 60 });
     let fired = false;

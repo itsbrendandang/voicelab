@@ -2,15 +2,19 @@
  * Protocol client: owns the reconnecting socket and the reducer. Audio-path
  * messages (tts.*, speak, binary frames) are also forwarded synchronously to
  * `onMessage` / `onBinary` so playback never waits for a React render.
+ *
+ * Remembers the server's `runId` (memory + sessionStorage) and asks to resume
+ * it on every (re)connect, so a dropped link keeps the run and the UI state.
  */
-import { useCallback, useEffect, useMemo, useReducer, useRef } from "react";
+import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from "react";
 import type { ClientMessage, ServerMessage, SessionConfig } from "../protocol";
+import { RunMemory } from "../lib/runResume";
 import { defaultSocketUrl, VoiceLabSocket, type SessionStartParams } from "../lib/socket";
 import { initialState, reducer, type VoiceLabState } from "../state/reducer";
 
 export interface UseVoiceLabOptions {
-  /** Read on every (re)connect. */
-  sessionParams: () => SessionStartParams;
+  /** Read on every (re)connect. `resumeRunId` is filled in here, from the last `session.ready`. */
+  sessionParams: () => Omit<SessionStartParams, "resumeRunId">;
   onMessage?: (msg: ServerMessage, receivedAt: number) => void;
   onBinary?: (data: ArrayBuffer) => void;
   url?: string;
@@ -37,17 +41,19 @@ export function useVoiceLab(opts: UseVoiceLabOptions): VoiceLabApi {
   const optsRef = useRef(opts);
   optsRef.current = opts;
   const socketRef = useRef<VoiceLabSocket | null>(null);
+  const [runMemory] = useState(() => new RunMemory());
 
   useEffect(() => {
     const socket = new VoiceLabSocket(
       opts.url ?? defaultSocketUrl(),
       {
         onConnecting: (retry) => dispatch({ type: "ws/connecting", attempt: retry }),
-        onOpen: () => dispatch({ type: "ws/open" }),
+        onOpen: (start) => dispatch({ type: "ws/open", resumeRunId: start.resumeRunId ?? null }),
         onClose: ({ attempt, retryAt, reason }) => dispatch({ type: "ws/closed", attempt, retryAt, reason }),
         onRtt: (ms) => dispatch({ type: "rtt", ms }),
         onBinary: (data) => optsRef.current.onBinary?.(data),
         onMessage: (msg, at) => {
+          if (msg.type === "session.ready" && typeof msg.runId === "string") runMemory.remember(msg.runId);
           try {
             optsRef.current.onMessage?.(msg, at);
           } finally {
@@ -56,7 +62,11 @@ export function useVoiceLab(opts: UseVoiceLabOptions): VoiceLabApi {
           if (msg.type === "error" && msg.fatal) socket.stop();
         },
       },
-      () => optsRef.current.sessionParams(),
+      () => {
+        const params: SessionStartParams = optsRef.current.sessionParams();
+        const resumeRunId = runMemory.runId;
+        return resumeRunId ? { ...params, resumeRunId } : params;
+      },
     );
     socketRef.current = socket;
     socket.start();
@@ -64,7 +74,7 @@ export function useVoiceLab(opts: UseVoiceLabOptions): VoiceLabApi {
       socket.stop();
       socketRef.current = null;
     };
-  }, [opts.url]);
+  }, [opts.url, runMemory]);
 
   const send = useCallback((msg: ClientMessage) => socketRef.current?.send(msg) ?? false, []);
   const sendAudio = useCallback((frame: ArrayBuffer) => socketRef.current?.sendBinary(frame) ?? false, []);

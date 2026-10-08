@@ -16,8 +16,9 @@ function isEditable(target: EventTarget | null): boolean {
 
 /**
  * Global keyboard / foot-pedal control.
- *  - PTT key (Space by default) held = push-to-talk; in hands-free it stops the assistant.
- *  - Escape = stop the assistant.
+ *  - PTT key (Space by default) held = push-to-talk; in hands-free a press
+ *    interrupts the assistant's reply (urgent safety speech keeps playing).
+ *  - Escape = stop the assistant (everything, like the Stop button).
  * Ignored while typing in a text field.
  */
 export function usePttKeyboard(engine: VoiceEngine, pttKey: string, listen: ListenMode, busy: boolean): void {
@@ -34,7 +35,7 @@ export function usePttKeyboard(engine: VoiceEngine, pttKey: string, listen: List
       e.preventDefault();
       if (e.repeat) return;
       if (listen === "ptt") engine.pttDown();
-      else if (busyRef.current) engine.stopSpeaking();
+      else if (busyRef.current) engine.interruptReply();
     };
     const up = (e: KeyboardEvent) => {
       if (e.code !== pttKey || isEditable(e.target)) return;

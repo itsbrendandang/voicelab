@@ -4,10 +4,12 @@
  */
 import type { ClientMessage, ServerMessage, SessionConfig } from "../protocol";
 import { PROTOCOL_VERSION } from "../protocol";
+import { redactToken, withToken } from "./access";
 
+/** `/ws` on this host, carrying the page's `?token=` (if any). */
 export function defaultSocketUrl(): string {
   const proto = location.protocol === "https:" ? "wss" : "ws";
-  return `${proto}://${location.host}/ws`;
+  return withToken(`${proto}://${location.host}/ws`);
 }
 
 /** Exponential backoff with +-20 % jitter: 0.5 s, 1 s, 2 s, 4 s, 8 s, then 10 s. */
@@ -30,7 +32,8 @@ export function parseServerMessage(data: string): ServerMessage | null {
 export interface SocketEvents {
   /** `retry` = consecutive failed connections so far (0 on the first attempt). */
   onConnecting(retry: number): void;
-  onOpen(): void;
+  /** Socket open; `start` is what the `session.start` handshake carries. */
+  onOpen(start: SessionStartParams): void;
   /** `attempt` = number of the upcoming retry (1, 2, ...). */
   onClose(info: { attempt: number; retryAt: number | null; reason: string }): void;
   onMessage(msg: ServerMessage, receivedAt: number): void;
@@ -41,6 +44,18 @@ export interface SocketEvents {
 export interface SessionStartParams {
   config: SessionConfig;
   sopId?: string;
+  /** Run to re-attach to (from an earlier `session.ready`). */
+  resumeRunId?: string;
+}
+
+export function buildSessionStart({ config, sopId, resumeRunId }: SessionStartParams): ClientMessage {
+  return {
+    type: "session.start",
+    protocol: PROTOCOL_VERSION,
+    config,
+    ...(sopId ? { sopId } : {}),
+    ...(resumeRunId ? { resumeRunId } : {}),
+  };
 }
 
 const PING_INTERVAL_MS = 10_000;
@@ -128,7 +143,8 @@ export class VoiceLabSocket {
     try {
       ws = new WebSocket(this.url);
     } catch (err) {
-      this.scheduleRetry(`Could not open socket: ${String(err)}`);
+      // The error text can quote the URL, which carries the access token.
+      this.scheduleRetry(`Could not open socket: ${redactToken(String(err))}`);
       return;
     }
     ws.binaryType = "arraybuffer";
@@ -141,10 +157,9 @@ export class VoiceLabSocket {
     ws.onopen = () => {
       if (this.connectTimer) clearTimeout(this.connectTimer);
       this.connectTimer = null;
-      this.events.onOpen();
-      const { config, sopId } = this.sessionParams();
-      const start: ClientMessage = { type: "session.start", protocol: PROTOCOL_VERSION, config, ...(sopId ? { sopId } : {}) };
-      ws.send(JSON.stringify(start));
+      const params = this.sessionParams();
+      this.events.onOpen(params);
+      ws.send(JSON.stringify(buildSessionStart(params)));
       this.lastPong = Date.now();
       this.pingTimer = setInterval(() => this.ping(), PING_INTERVAL_MS);
     };
@@ -173,7 +188,7 @@ export class VoiceLabSocket {
       this.ws = null;
       this.ready = false;
       this.clearTimers();
-      const reason = ev.reason || (ev.code === 1006 ? "Server unreachable" : `Connection closed (${ev.code})`);
+      const reason = redactToken(ev.reason) || (ev.code === 1006 ? "Server unreachable" : `Connection closed (${ev.code})`);
       this.scheduleRetry(reason);
     };
   }

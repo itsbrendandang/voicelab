@@ -98,6 +98,10 @@ export interface VoiceLabState {
   lastCloseReason: string | null;
   fatalError: string | null;
   sessionId: string | null;
+  /** Run the server attached this client to (from `session.ready`). */
+  runId: string | null;
+  /** Run asked for in the pending `session.start` handshake (`resumeRunId`), until `session.ready`. */
+  resumeRequested: string | null;
   serverProtocol: number | null;
   providers: ProviderInfo | null;
   /** Server-confirmed config, patched optimistically by local changes. */
@@ -124,7 +128,8 @@ export type Action =
   | { type: "ws/connecting"; attempt: number }
   /** Manual retry: clears a fatal/failed state. */
   | { type: "ws/reset" }
-  | { type: "ws/open" }
+  /** Socket open, `session.start` sent (with `resumeRunId` when re-attaching to a run). */
+  | { type: "ws/open"; resumeRunId?: string | null }
   | { type: "ws/closed"; attempt: number; retryAt: number | null; reason?: string }
   | { type: "server"; msg: ServerMessage; at: number }
   | { type: "rtt"; ms: number }
@@ -157,6 +162,8 @@ export function initialState(config: SessionConfig): VoiceLabState {
     lastCloseReason: null,
     fatalError: null,
     sessionId: null,
+    runId: null,
+    resumeRequested: null,
     serverProtocol: null,
     providers: null,
     config,
@@ -219,6 +226,32 @@ function findLastIndex<T>(list: readonly T[], pred: (v: T) => boolean): number {
   return -1;
 }
 
+/** Add an alert, or update it in place by id (keeping acked/dismissed). */
+function pushAlert(state: VoiceLabState, alert: Alert, at: number): VoiceLabState {
+  const idx = state.alerts.findIndex((a) => a.alert.id === alert.id);
+  if (idx >= 0) {
+    const alerts = state.alerts.slice();
+    const prev = alerts[idx] as AlertEntry;
+    alerts[idx] = { ...prev, alert };
+    return { ...state, alerts };
+  }
+  const entry: AlertEntry = { alert, receivedAt: at, acked: false, dismissed: false };
+  return { ...state, alerts: cap([...state.alerts, entry], LIMITS.alerts) };
+}
+
+/** Local info toast (auto-dismisses like any info alert): a reconnect could not resume the run. */
+function newRunToast(runId: string, at: number): Alert {
+  return {
+    id: `local-new-run-${runId}`,
+    level: "info",
+    title: "New run started",
+    message: "The previous run could not be resumed after reconnecting, so the server started a fresh one. Earlier readings and timers are not part of it.",
+    source: "system",
+    at: new Date(at).toISOString(),
+    requiresAck: false,
+  };
+}
+
 export function reducer(state: VoiceLabState, action: Action): VoiceLabState {
   switch (action.type) {
     case "ws/connecting":
@@ -228,7 +261,7 @@ export function reducer(state: VoiceLabState, action: Action): VoiceLabState {
       return { ...state, connection: "connecting", fatalError: null, retryAt: null };
     case "ws/open":
       if (state.connection === "failed") return state;
-      return { ...state, connection: "handshaking" };
+      return { ...state, connection: "handshaking", resumeRequested: action.resumeRunId ?? null };
     case "ws/closed":
       return {
         ...state,
@@ -276,6 +309,11 @@ export function reducer(state: VoiceLabState, action: Action): VoiceLabState {
 export function applyServerMessage(state: VoiceLabState, msg: ServerMessage, at: number): VoiceLabState {
   switch (msg.type) {
     case "session.ready": {
+      // Also re-sent mid-session (config change, TTS fallback): only a handshake carries `resumeRequested`.
+      const runId = typeof msg.runId === "string" && msg.runId ? msg.runId : state.runId;
+      const resumed = msg.resumed === true;
+      const resumeFailed = state.resumeRequested !== null && !resumed;
+      const newRun = state.runId !== null && runId !== state.runId;
       let next: VoiceLabState = {
         ...state,
         connection: "ready",
@@ -284,16 +322,26 @@ export function applyServerMessage(state: VoiceLabState, msg: ServerMessage, at:
         lastCloseReason: null,
         fatalError: null,
         sessionId: msg.sessionId,
+        runId,
+        resumeRequested: null,
         serverProtocol: msg.protocol,
         providers: msg.providers,
         config: msg.config,
         sops: msg.sops,
         partial: "",
         status: { listening: false, thinking: false, speaking: false },
+        // The run record belongs to the run; a resumed run keeps it (the server re-sends `state`).
+        timeline: newRun ? [] : state.timeline,
       };
+      if (resumeFailed) next = pushAlert(next, newRunToast(runId ?? msg.sessionId, at), at);
       if (state.sessionId && state.sessionId !== msg.sessionId && state.conversation.length > 0) {
+        const text = resumed
+          ? "Reconnected: the run was resumed."
+          : resumeFailed
+            ? "Reconnected: the previous run could not be resumed, so a new run started."
+            : "Reconnected: a new session started.";
         const [id, seq] = nextId(next, "n");
-        next = pushConversation(next, { kind: "notice", id, text: "Reconnected: a new session started.", tone: "info", at }, seq);
+        next = pushConversation(next, { kind: "notice", id, text, tone: "info", at }, seq);
       }
       return next;
     }
@@ -365,17 +413,8 @@ export function applyServerMessage(state: VoiceLabState, msg: ServerMessage, at:
       };
     }
 
-    case "alert": {
-      const idx = state.alerts.findIndex((a) => a.alert.id === msg.alert.id);
-      if (idx >= 0) {
-        const alerts = state.alerts.slice();
-        const prev = alerts[idx] as AlertEntry;
-        alerts[idx] = { ...prev, alert: msg.alert };
-        return { ...state, alerts };
-      }
-      const entry: AlertEntry = { alert: msg.alert, receivedAt: at, acked: false, dismissed: false };
-      return { ...state, alerts: cap([...state.alerts, entry], LIMITS.alerts) };
-    }
+    case "alert":
+      return pushAlert(state, msg.alert, at);
 
     case "calc": {
       const [id, seq] = nextId(state, "c");

@@ -50,15 +50,21 @@ export class BargeInDetector {
   /**
    * Feed one mic frame. `assistantSpeaking` gates detection; the noise floor is
    * only learned while the assistant is silent (so its own echo is not learned).
+   * `interruptible: false` (urgent safety speech is audible) disarms detection
+   * without learning anything, so that audio's echo never counts as the operator.
    * Returns true exactly once per barge-in.
    */
-  update(level: number, nowMs: number, assistantSpeaking: boolean): boolean {
+  update(level: number, nowMs: number, assistantSpeaking: boolean, interruptible = true): boolean {
     if (!assistantSpeaking) {
       // Fast attack downward, very slow rise: tracks the steady background.
       const a = level < this.noiseFloor ? 0.2 : 0.002;
       this.noiseFloor = this.noiseFloor * (1 - a) + level * a;
       this.aboveSince = null;
       this.fired = false;
+      return false;
+    }
+    if (!interruptible) {
+      this.aboveSince = null;
       return false;
     }
     if (this.fired) return false;
