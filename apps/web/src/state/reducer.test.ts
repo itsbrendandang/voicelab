@@ -12,6 +12,8 @@ const srv = (msg: ServerMessage, at = 1_000_000): Action => ({ type: "server", m
 const READY: ServerMessage = {
   type: "session.ready",
   sessionId: "s1",
+  runId: "r1",
+  resumed: false,
   protocol: 1,
   providers: { stt: "deepgram", llm: "anthropic:claude", tts: "elevenlabs" },
   config: { stt: "browser", tts: "server", listen: "ptt", wakePhrase: "hey lab" },
@@ -65,6 +67,66 @@ describe("connection lifecycle", () => {
   });
 });
 
+describe("run resume", () => {
+  const ev: LabEvent = { type: "step.started", at: "2026-10-07T12:00:00.000Z", stepId: "s1" };
+  /** First connect, some history, then the link drops and a retry handshakes asking to resume r1. */
+  function droppedAfterHistory(): VoiceLabState {
+    return run([
+      { type: "ws/open" },
+      srv(READY),
+      { type: "user/text", text: "next step", source: "typed", at: 1 },
+      srv({ type: "event", event: ev }),
+      { type: "ws/closed", attempt: 1, retryAt: 2000, reason: "Server unreachable" },
+      { type: "ws/connecting", attempt: 1 },
+      { type: "ws/open", resumeRunId: "r1" },
+    ]);
+  }
+
+  it("stores the runId and tracks the resume request until session.ready", () => {
+    let s = run([{ type: "ws/open" }, srv(READY)]);
+    expect(s.runId).toBe("r1");
+    expect(s.resumeRequested).toBeNull();
+    s = reducer(s, { type: "ws/open", resumeRunId: "r1" });
+    expect(s.resumeRequested).toBe("r1");
+    s = reducer(s, srv({ ...READY, sessionId: "s2", resumed: true }));
+    expect(s.resumeRequested).toBeNull();
+    expect(s.runId).toBe("r1");
+  });
+
+  it("keeps transcript and run record when the run is resumed, without a new-run toast", () => {
+    const before = droppedAfterHistory();
+    const s = reducer(before, srv({ ...READY, sessionId: "s2", resumed: true }));
+    expect(s.connection).toBe("ready");
+    expect(s.conversation.filter((c) => c.kind === "user")).toHaveLength(1);
+    expect(s.timeline).toHaveLength(1);
+    expect(toastAlerts(s)).toHaveLength(0);
+    expect(s.conversation.at(-1)).toMatchObject({ kind: "notice", tone: "info", text: "Reconnected: the run was resumed." });
+  });
+
+  it("shows a brief info toast when a requested resume starts a new run instead", () => {
+    const s = reducer(droppedAfterHistory(), srv({ ...READY, sessionId: "s2", runId: "r2", resumed: false }));
+    expect(s.runId).toBe("r2");
+    const toasts = toastAlerts(s);
+    expect(toasts).toHaveLength(1);
+    expect(toasts[0]?.alert).toMatchObject({ level: "info", source: "system", requiresAck: false, title: "New run started" });
+    expect(pinnedAlerts(s)).toHaveLength(0);
+    // Transcript stays; the old run's record does not carry over into the new run.
+    expect(s.conversation.some((c) => c.kind === "user" && c.text === "next step")).toBe(true);
+    expect(s.timeline).toHaveLength(0);
+    expect(s.conversation.at(-1)).toMatchObject({ kind: "notice", text: expect.stringContaining("could not be resumed") });
+  });
+
+  it("does not toast for a session.ready re-sent mid-session or a first connect without a stored run", () => {
+    let s = run([{ type: "ws/open" }, srv(READY)]);
+    s = reducer(s, srv({ ...READY, config: { ...READY.config, tts: "browser" } } as ServerMessage)); // config change re-sends ready
+    expect(toastAlerts(s)).toHaveLength(0);
+    // A reload whose stored run is gone: asked, not resumed -> toast even without prior UI state.
+    const fresh = run([{ type: "ws/open", resumeRunId: "old" }, srv({ ...READY, runId: "r9", resumed: false })]);
+    expect(toastAlerts(fresh)).toHaveLength(1);
+    expect(fresh.conversation).toHaveLength(0);
+  });
+});
+
 describe("transcripts", () => {
   it("interim sets partial, final appends a voice turn and clears partial", () => {
     let s = run([srv({ type: "transcript", text: "dilute the", final: false })]);
@@ -115,7 +177,7 @@ describe("assistant turns", () => {
   it("treats audio-path messages as state no-ops", () => {
     const s0 = run([srv(READY)]);
     for (const msg of [
-      { type: "tts.start", turnId: "t1", sampleRate: 24000 },
+      { type: "tts.start", turnId: "t1", sampleRate: 24000, priority: "urgent" },
       { type: "tts.end", turnId: "t1" },
       { type: "speak", turnId: "t1", text: "hello", priority: "urgent" },
       { type: "pong", t: 5 },

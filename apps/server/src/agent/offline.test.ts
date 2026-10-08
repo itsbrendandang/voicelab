@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, it } from "vitest";
 import { readFileSync } from "node:fs";
 import { ExperimentRun, parseSop } from "@voicelab/core";
-import { OfflineAgent, findQuantities, normalizeUtterance } from "./offline";
+import { OfflineAgent, findQuantities, hedge, normalizeUtterance, parseMolecularWeight } from "./offline";
 import type { ToolResultInfo } from "./types";
 import { fixtureSop } from "../testing/helpers";
 
@@ -71,6 +71,53 @@ describe("OfflineAgent intents", () => {
     expect(run.state.currentStepId).toBe("s3");
   });
 
+  it("never completes or confirms a step on a negated or questioning utterance", async () => {
+    // "I'm not done yet" used to complete the current step
+    const notYet = await say("I'm not done yet");
+    expect(notYet.tools).toEqual([]);
+    expect(run.state.currentStepId).toBe("s1");
+    expect(notYet.reply).toMatch(/take your time/i);
+    for (const t of ["not finished", "almost done", "I haven't finished", "I dont think I'm done", "no, not done", "not yet, still mixing"]) {
+      expect((await say(t)).tools, t).not.toContain("complete_step");
+      expect(run.state.currentStepId, t).toBe("s1");
+    }
+    const asking = await say("am I done?");
+    expect(asking.tools).toEqual([]);
+    expect(asking.reply).toMatch(/step 1, Prepare buffer.*isn't marked done/);
+    expect((await say("is this step complete")).tools).toEqual([]);
+    const whatsNext = await say("what's next?");
+    expect(whatsNext.tools).toEqual([]);
+    expect(whatsNext.reply).toMatch(/Next is step 2, Prepare BSA standards/);
+    expect((await say("don't go to the next step")).tools).toEqual([]);
+    expect(run.state.currentStepId).toBe("s1");
+    // plain statements and polite requests still complete
+    await say("can we move on?");
+    expect(run.state.currentStepId).toBe("s2");
+
+    // critical step: "I can't confirm this step yet" used to complete it
+    const ask = await say("done");
+    expect(ask.reply).toMatch(/critical step/);
+    for (const t of ["I can't confirm this step yet", "I cannot confirm the step", "no", "yes, but the pipette isn't calibrated", "can you confirm the step?"]) {
+      const r = await say(t);
+      expect(r.tools, t).not.toContain("complete_step");
+      expect(run.state.currentStepId, t).toBe("s2");
+    }
+    // still waiting for the confirmation after all that
+    const ok = await say("yes");
+    expect(ok.tools).toEqual(["complete_step"]);
+    expect(run.state.currentStepId).toBe("s3");
+  });
+
+  it("classifies hedges", () => {
+    expect(hedge("I'm not done yet")).toBe("negated");
+    expect(hedge("I can't confirm this step yet")).toBe("negated");
+    expect(hedge("am I done?")).toBe("status");
+    expect(hedge("how do I know when I'm done?")).toBe("question");
+    expect(hedge("could you go to the next step")).toBeUndefined();
+    expect(hedge("done, next")).toBeUndefined();
+    expect(hedge("confirmed")).toBeUndefined();
+  });
+
   it("does dilution math through the calc tool and speaks its result", async () => {
     const r = await say("dilute ten millimolar to fifty micromolar in two milliliters");
     expect(r.tools).toEqual(["calc_dilution"]);
@@ -101,6 +148,27 @@ describe("OfflineAgent intents", () => {
     expect(missing.reply).toMatch(/not a reagent in the SOP/);
   });
 
+  it("asks for a molecular weight it doesn't have, then uses the one the operator gives", async () => {
+    const sop = parseSop(readFileSync(new URL("../../../../sops/tris-buffer-prep.yaml", import.meta.url), "utf8"));
+    run = new ExperimentRun({ runId: "run-tris", sop });
+    run.start();
+    agent = new OfflineAgent({ run });
+    const ask = await say("make 500 mL of 1 M Tris-HCl");
+    expect(ask.results[0]!.isError).toBe(true);
+    expect(ask.reply).toMatch(/"Tris-HCl" is not a reagent in the SOP.*Tell me the molecular weight/);
+    const r = await say("it's 157.6 grams per mole");
+    expect(r.tools).toEqual(["calc_molar_solution"]);
+    expect(r.results[0]!.input).toMatchObject({ concentration: "1 M", volume: "500 mL", reagent: "Tris-HCl", molecular_weight: 157.6 });
+    expect(r.results[0]!.isError).toBe(false);
+    // stated up front works too
+    const upfront = await say("make 100 mL of 1 M acetic acid, molecular weight 60.05");
+    expect(upfront.results[0]!.input).toMatchObject({ reagent: "acetic acid", molecular_weight: 60.05 });
+    expect(upfront.results[0]!.isError).toBe(false);
+    expect(parseMolecularWeight("MW is 58.44 g/mol", false)).toBe(58.44);
+    expect(parseMolecularWeight("157.6", false)).toBeUndefined();
+    expect(parseMolecularWeight("157.6", true)).toBe(157.6);
+  });
+
   it("starts and cancels timers", async () => {
     const t = await say("start a five minute timer for the incubation");
     expect(t.tools).toEqual(["start_timer"]);
@@ -121,6 +189,32 @@ describe("OfflineAgent intents", () => {
     const bad = await say("the absorbance was 0.9");
     expect(bad.reply).toMatch(/^Warning: .*out of range; expected between 0.2 and 0.6/);
     expect(run.state.deviations.length).toBeGreaterThan(0);
+  });
+
+  it("treats 'at <wavelength>' after the label as a qualifier, not the value", async () => {
+    await say("go to step 4");
+    const r = await say("the absorbance at 595 is 0.45");
+    expect(r.tools).toEqual(["record_measurement"]);
+    expect(r.results[0]!.input).toMatchObject({ value: 0.45, unit: "AU", spec_id: "a595" });
+    expect(run.state.measurements.at(-1)).toMatchObject({ value: 0.45, unit: "AU" });
+    const nm = await say("absorbance at 595 nm was 0.5");
+    expect(nm.results[0]!.input).toMatchObject({ value: 0.5, unit: "AU" });
+    const od = await say("OD600 at 1.2");
+    expect(od.results[0]!.input).toMatchObject({ value: 1.2 });
+    // a bare wavelength is not a reading
+    expect((await say("read the absorbance at 595 nm")).tools).not.toContain("record_measurement");
+  });
+
+  it("never lets the verb leak into a reading's qualifier", async () => {
+    // "absorbance of the blank is 1.9" used to log "blank is absorbance"
+    const r = await say("absorbance of the blank is 1.9");
+    expect(r.tools).toEqual(["record_measurement"]);
+    expect(r.results[0]!.input).toMatchObject({ value: 1.9, label: "blank absorbance" });
+    expect(r.reply).toMatch(/blank absorbance 1\.9/);
+    const two = await say("the pH for sample 2 was 7.4");
+    expect(two.results[0]!.input).toMatchObject({ value: 7.4, label: "sample 2 pH" });
+    const wave = await say("absorbance of the blank at 595 is 0.1");
+    expect(wave.results[0]!.input).toMatchObject({ value: 0.1, label: "blank absorbance" });
   });
 
   it("never binds a labelled reading to an unrelated spec on the step", async () => {

@@ -199,12 +199,34 @@ function fuzzyStep(sop: Sop, text: string, curIdx: number): Step | undefined {
   return undefined;
 }
 
-/** Find an SOP reagent by id, name or alias (exact, then whole-word containment). */
-export function findReagent(sop: Sop | undefined, query: string): Reagent | undefined {
-  if (!sop || !query) return undefined;
+/** Words dropped before an "exact" reagent match: "the Tris stock" = "Tris", "HCl solution" = "HCl". */
+const REAGENT_FILLER = new Set(["the", "a", "some", "stock", "solution", "buffer", "powder", "reagent", "of"]);
+
+function withoutFiller(cleaned: string): string {
+  return cleaned
+    .split(" ")
+    .filter((w) => w && !REAGENT_FILLER.has(w))
+    .join(" ");
+}
+
+/**
+ * Resolve a spoken reagent name to an SOP reagent.
+ * mode "loose" (default): exact id/name/alias, else the longest name contained in the query or vice versa.
+ * mode "exact": exact id/name/alias after dropping filler words ("the", "stock", "solution", ...) only.
+ * Undefined when nothing matches, or when the words match more than one reagent.
+ * Use "exact" whenever the result feeds a calculation (molecular weight): "Tris-HCl" must not resolve to Tris base.
+ */
+export function findReagent(sop: Sop | undefined, query: string, opts?: { mode?: "loose" | "exact" }): Reagent | undefined {
+  if (!sop || typeof query !== "string" || !query) return undefined;
   const n = cleanText(query);
   if (!n) return undefined;
   const names = (r: Reagent) => [r.id, r.name, ...r.aliases].map((x) => cleanText(x)).filter(Boolean);
+  if (opts?.mode === "exact") {
+    const q = withoutFiller(n);
+    if (!q) return undefined;
+    const hits = sop.reagents.filter((r) => names(r).some((name) => withoutFiller(name) === q));
+    return hits.length === 1 ? hits[0] : undefined;
+  }
   const exact = sop.reagents.find((r) => names(r).includes(n));
   if (exact) return exact;
   const padded = ` ${n} `;

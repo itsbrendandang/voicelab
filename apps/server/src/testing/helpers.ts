@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { SopSchema, type ServerMessage, type Sop, type SopInput } from "@voicelab/core";
 import type { LabAgent, RunTurnOptions } from "../agent/types";
 import type { SttEvents, SttOpenOptions, SttProvider, SttStream } from "../providers/stt/types";
-import type { TtsProvider } from "../providers/tts/types";
+import type { SynthesisHooks, TtsProvider } from "../providers/tts/types";
 import type { SessionTransport } from "../session";
 
 export const FIXTURE_SOP_INPUT: SopInput = {
@@ -151,13 +151,14 @@ export class FakeTts implements TtsProvider {
   readonly sampleRate = 16000;
   readonly sentences: string[] = [];
   constructor(private readonly delayMs = 0) {}
-  async *synthesize(text: AsyncIterable<string>, signal: AbortSignal): AsyncIterable<Buffer> {
+  async *synthesize(text: AsyncIterable<string>, signal: AbortSignal, hooks?: SynthesisHooks): AsyncIterable<Buffer> {
     for await (const s of text) {
       if (signal.aborted) return;
       this.sentences.push(s);
       if (this.delayMs) await new Promise((r) => setTimeout(r, this.delayMs));
       if (signal.aborted) return;
       yield Buffer.alloc(320, 1);
+      hooks?.onChunkDone?.(s);
     }
   }
 }

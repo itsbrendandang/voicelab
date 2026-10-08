@@ -254,6 +254,59 @@ describe("findReagent", () => {
     expect(findReagent(sop, "the HCl bottle")?.id).toBe("acid");
     expect(findReagent(sop, "water")).toBeUndefined();
   });
+
+  describe("exact mode (feeds calculations)", () => {
+    let tris: Sop;
+    beforeAll(async () => {
+      tris = (await loadSopsFromDir(SOPS_DIR)).sops.find((s) => s.id === "tris-buffer-prep")!;
+    });
+    const exact = (q: string) => findReagent(tris, q, { mode: "exact" })?.id;
+
+    it("does not resolve a different compound that only shares a word", () => {
+      // no tris-buffer-prep reagent is named or aliased "Tris-HCl" (that is the product, not an input)
+      expect(tris.reagents.flatMap((r) => [r.id, r.name, ...r.aliases]).map((n) => n.toLowerCase())).not.toContain("tris-hcl");
+      expect(exact("Tris-HCl")).toBeUndefined();
+      expect(exact("Tris HCl")).toBeUndefined();
+      expect(exact("acetic acid")).toBeUndefined();
+      expect(exact("the HCl bottle")).toBeUndefined();
+      expect(exact("Tris base sodium salt")).toBeUndefined();
+      // loose mode keeps its containment behavior
+      expect(findReagent(tris, "Tris-HCl")?.id).toBe("tris-base");
+      expect(findReagent(tris, "acetic acid")?.id).toBe("conc-hcl");
+    });
+
+    it("matches id, name and aliases after dropping filler words only", () => {
+      expect(exact("tris base")).toBe("tris-base");
+      expect(exact("Tris base")).toBe("tris-base");
+      expect(exact("the Tris stock")).toBe("tris-base");
+      expect(exact("Tris base powder")).toBe("tris-base");
+      expect(exact("Trizma")).toBe("tris-base");
+      expect(exact("tris-base")).toBe("tris-base");
+      expect(exact("HCl")).toBe("conc-hcl");
+      expect(exact("the concentrated HCl")).toBe("conc-hcl");
+      expect(exact("some conc. HCl solution")).toBe("conc-hcl");
+      expect(exact("1 M HCl")).toBe("hcl-1m");
+      expect(exact("the DI water")).toBe("water");
+      expect(exact("pH 7 buffer")).toBe("ph-buffers");
+    });
+
+    it("returns undefined for empty, filler-only or ambiguous queries", () => {
+      expect(exact("")).toBeUndefined();
+      expect(exact("the stock solution")).toBeUndefined();
+      expect(findReagent(undefined, "Tris", { mode: "exact" })).toBeUndefined();
+      const twin = parseSop(`
+id: twin
+title: Twin
+reagents:
+  - { id: a, name: Salt A, aliases: [salt] }
+  - { id: b, name: Salt B, aliases: [salt] }
+steps:
+  - { id: s1, title: Weigh, instruction: Weigh it. }
+`);
+      expect(findReagent(twin, "salt", { mode: "exact" })).toBeUndefined();
+      expect(findReagent(twin, "salt B", { mode: "exact" })?.id).toBe("b");
+    });
+  });
 });
 
 describe("loadSopsFromDir", () => {

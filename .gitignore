@@ -6,3 +6,7 @@ data/sessions/
 *.log
 .DS_Store
 coverage/
+
+# Local agent instructions (not committed)
+CLAUDE.md
+AGENTS.md

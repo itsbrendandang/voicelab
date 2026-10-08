@@ -15,7 +15,7 @@
  * First audio therefore arrives ~ (time to first sentence from the LLM) +
  * (Flash model TTFB, ~75–150 ms) + one RTT.
  */
-import { Pcm16Aligner, type TtsProvider } from "./types";
+import { Pcm16Aligner, type SynthesisHooks, type TtsProvider } from "./types";
 import { AsyncQueue, Semaphore } from "../../util/async-queue";
 
 export interface ElevenLabsTtsOptions {
@@ -67,8 +67,8 @@ export class ElevenLabsTts implements TtsProvider {
     });
   }
 
-  async *synthesize(text: AsyncIterable<string>, signal: AbortSignal): AsyncIterable<Buffer> {
-    const responses = new AsyncQueue<Promise<Response>>();
+  async *synthesize(text: AsyncIterable<string>, signal: AbortSignal, hooks?: SynthesisHooks): AsyncIterable<Buffer> {
+    const responses = new AsyncQueue<{ text: string; response: Promise<Response> }>();
     const slots = new Semaphore(Math.max(1, this.opts.maxInFlight ?? 2));
     // Local controller: stops the producer and in-flight requests when the
     // consumer exits for any reason (abort, error, early return).
@@ -88,7 +88,7 @@ export class ElevenLabsTts implements TtsProvider {
           if (!(await slots.acquire(local.signal))) break;
           const p = this.request(s, previous, local.signal);
           p.catch(() => undefined); // surfaced by the consumer
-          if (!responses.push(p)) break;
+          if (!responses.push({ text: s, response: p })) break;
           previous = s;
         }
         responses.close();
@@ -101,12 +101,15 @@ export class ElevenLabsTts implements TtsProvider {
       for await (const pending of responses) {
         try {
           if (signal.aborted) return;
-          const res = await pending;
+          const res = await pending.response;
           if (!res.ok) {
             const detail = await res.text().catch(() => "");
             throw new TtsError(`ElevenLabs TTS HTTP ${res.status}: ${detail.slice(0, 200)}`, res.status);
           }
-          if (!res.body) continue;
+          if (!res.body) {
+            hooks?.onChunkDone?.(pending.text);
+            continue;
+          }
           const aligner = new Pcm16Aligner();
           const reader = res.body.getReader();
           try {
@@ -120,6 +123,7 @@ export class ElevenLabsTts implements TtsProvider {
           } finally {
             reader.releaseLock();
           }
+          hooks?.onChunkDone?.(pending.text);
         } finally {
           slots.release();
         }

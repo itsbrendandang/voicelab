@@ -179,7 +179,8 @@ A missing key degrades gracefully: STT and TTS fall back to the browser, and the
 | `ELEVENLABS_TTS_SAMPLE_RATE` | `24000` | 16000 / 22050 / 24000 / 44100 |
 | `ELEVENLABS_STT_MODEL` | `scribe_v2_realtime` | Realtime STT |
 | `VOICELAB_SOP_DIR`, `VOICELAB_DATA_DIR`, `VOICELAB_WEB_DIST`, `VOICELAB_SERVE_WEB` | repo paths | SOPs, run logs, web build |
-| `PORT` / `HOST` / `VOICELAB_LOG_LEVEL` | `8787` / `0.0.0.0` / — | Server |
+| `PORT` / `HOST` / `VOICELAB_LOG_LEVEL` | `8787` / `127.0.0.1` / — | Server (the Docker image sets `HOST=0.0.0.0` inside the container) |
+| `VOICELAB_ACCESS_TOKEN`, `VOICELAB_ALLOWED_ORIGINS`, `VOICELAB_RESUME_GRACE_MS` | unset / Vite dev origins / `600000` | Shared secret for non-loopback use, extra WebSocket origins, how long a disconnected run is kept for resume |
 
 ### Proposed for the next steps in §6
 

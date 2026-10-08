@@ -15,6 +15,7 @@
 import WebSocket from "ws";
 import { PendingAudio, type SttOpenOptions, type SttProvider, type SttStream } from "./types";
 import type { Logger } from "../../log";
+import { describeStatus } from "./deepgram";
 
 export interface ElevenLabsSttOptions {
   apiKey: string;
@@ -66,8 +67,15 @@ class ScribeStream implements SttStream {
         opts.logger?.debug("scribe: unparseable message", err);
       }
     });
-    this.ws.on("unexpected-response", (_req, res) => {
-      this.o.events.onError(new Error(`ElevenLabs STT rejected the connection (HTTP ${res.statusCode})`));
+    this.ws.on("unexpected-response", (req, res) => {
+      // `ws` leaves the handshake hanging once this listener exists: end it here so
+      // "close" fires and the session falls back to browser speech recognition.
+      const status = res.statusCode ?? 0;
+      res.resume();
+      this.o.events.onError(new Error(`ElevenLabs STT rejected the connection (HTTP ${status}${describeStatus(status)})`));
+      this.closed = true; // suppress the follow-up "error"/"closed (1006)" noise
+      this.ws.terminate();
+      req.destroy();
     });
     this.ws.on("error", (err) => {
       if (!this.closed) this.o.events.onError(new Error(`ElevenLabs STT connection error: ${err.message}`));

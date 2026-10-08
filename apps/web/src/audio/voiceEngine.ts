@@ -8,9 +8,11 @@
  *  - browser STT: Web Speech recogniser; finals -> `user.text`, interims -> partial.
  *  - server TTS: PcmPlayer (gapless scheduled AudioBuffers).
  *  - browser TTS: speechSynthesis for `speak` messages.
- *  - barge-in: sustained mic energy while the assistant is audible (handsfree),
- *    a PTT press, an operator-looking interim (browser STT), or the Stop button
- *    -> silence locally at once + send `interrupt`.
+ *  - barge-in: sustained mic energy while the assistant's *normal* speech is
+ *    audible (handsfree), a PTT press, or an operator-looking interim (browser
+ *    STT) -> drop normal speech locally at once + send `interrupt` scope "turn".
+ *    Urgent safety speech keeps playing and is never treated as the operator.
+ *  - Stop button / Escape -> silence everything + send `interrupt` scope "all".
  */
 import type { ClientMessage, ListenMode, ServerMessage, SttMode, TtsMode } from "../protocol";
 import { BARGE_IN_THRESHOLDS, BargeInDetector, isLikelyOperatorSpeech, type BargeInSensitivity } from "./bargeIn";
@@ -19,6 +21,7 @@ import { audioUnlocked, onAudioStateChange, peekAudioContext, webAudioSupported 
 import { MicCapture, MicError, micSupport, MIC_FRAME_MS } from "./micCapture";
 import type { PcmFrame } from "./pcm";
 import { PcmPlayer } from "./pcmPlayer";
+import type { AssistantVoice } from "./playbackQueue";
 import { BrowserStt, browserSttSupport } from "../speech/browserStt";
 import { BrowserTts, browserTtsSupported } from "../speech/browserTts";
 
@@ -139,6 +142,9 @@ export class VoiceEngine {
     }
     if (next.tts === "off" || (prev.tts === "browser" && next.tts !== "browser")) this.tts.cancel();
     if (next.tts === "off") this.player.stop();
+    // Link dropped mid-stream: frames of a new connection must not join the old job.
+    // Audio already scheduled (e.g. an urgent alert) plays out.
+    if (prev.connected && !next.connected) this.player.rejectIncoming();
     this.reconcile();
     this.refreshLocked();
   }
@@ -213,9 +219,14 @@ export class VoiceEngine {
     }
   }
 
-  /** Stop button / Escape: silence now and abandon the in-flight turn. */
+  /** Stop button / Escape: silence everything now (urgent included) and abandon the in-flight turn. */
   stopSpeaking(): void {
     this.bargeIn("stop");
+  }
+
+  /** Pedal / PTT key in hands-free: like talking over it, stops the reply but not urgent safety speech. */
+  interruptReply(): void {
+    this.bargeIn("ptt");
   }
 
   // ------------------------------------------------------------ server input
@@ -231,26 +242,35 @@ export class VoiceEngine {
         if (msg.turnId === this.currentTurnId) this.assistantText += msg.text;
         break;
       case "assistant.done":
-        if (msg.interrupted && (this.player.currentTurnId === msg.turnId || this.currentTurnId === msg.turnId)) {
-          this.player.stop();
-          this.tts.cancel();
+        // Only that turn's own (normal) audio; urgent speech queued around it plays on.
+        if (msg.interrupted) {
+          this.player.stopTurn(msg.turnId);
+          this.tts.cancelTurn(msg.turnId);
         }
         break;
-      case "tts.start":
-        if (this.settings.tts === "off" || msg.turnId === this.interruptedTurnId) return;
-        this.player.startTurn(msg.turnId, msg.sampleRate);
+      case "tts.start": {
+        const priority = msg.priority === "urgent" ? "urgent" : "normal";
+        if (this.settings.tts === "off" || (priority === "normal" && msg.turnId === this.interruptedTurnId)) {
+          this.player.rejectIncoming();
+          return;
+        }
+        if (priority === "urgent") this.tts.cancelNormal();
+        this.player.startJob(msg.turnId, msg.sampleRate, priority);
         this.detector.rearm();
         break;
+      }
       case "tts.end":
-        this.player.endTurn(msg.turnId);
+        this.player.endJob(msg.turnId);
         break;
-      case "speak":
+      case "speak": {
+        const priority = msg.priority === "urgent" ? "urgent" : "normal";
         if (this.settings.tts === "off") return;
-        if (msg.priority !== "urgent" && msg.turnId === this.interruptedTurnId) return;
-        if (msg.priority === "urgent") this.player.stop();
-        this.tts.speak(msg.text, msg.priority);
+        if (priority === "normal" && msg.turnId === this.interruptedTurnId) return;
+        if (priority === "urgent") this.player.stopNormal();
+        this.tts.speak(msg.text, priority, msg.turnId);
         this.detector.rearm();
         break;
+      }
       case "alert":
         if (!this.seenAlerts.has(msg.alert.id)) {
           this.seenAlerts.add(msg.alert.id);
@@ -276,6 +296,15 @@ export class VoiceEngine {
     return this.player.isPlaying || this.tts.isSpeaking;
   }
 
+  /** What barge-in may treat as the assistant's voice right now (urgent speech is protected). */
+  private assistantVoice(): AssistantVoice {
+    const pcm = this.player.voice;
+    const synth: AssistantVoice = !this.tts.isSpeaking ? "silent" : this.tts.currentPriority === "urgent" ? "protected" : "interruptible";
+    if (pcm === "protected" || synth === "protected") return "protected";
+    if (pcm === "interruptible" || synth === "interruptible") return "interruptible";
+    return "silent";
+  }
+
   private refreshPlaying(): void {
     this.set({ playing: this.isAssistantAudible() });
   }
@@ -285,19 +314,30 @@ export class VoiceEngine {
     this.set({ audioLocked: needsAudio && !audioUnlocked() && peekAudioContext()?.state !== "running" });
   }
 
+  /**
+   * "voice" / "ptt" = barge-in (scope "turn"): drop normal speech, urgent safety
+   * speech plays on. "stop" = explicit Stop (scope "all"): silence everything.
+   */
   private bargeIn(reason: "voice" | "ptt" | "stop"): void {
     const wasAudible = this.isAssistantAudible();
-    this.player.stop();
-    this.tts.cancel();
+    const scope = reason === "stop" ? "all" : "turn";
+    if (scope === "all") {
+      this.player.stop();
+      this.tts.cancel();
+    } else {
+      this.player.stopNormal();
+      this.tts.cancelNormal();
+    }
     this.interruptedTurnId = this.currentTurnId;
-    this.transport?.send({ type: "interrupt" });
+    this.transport?.send({ type: "interrupt", scope });
     if (reason !== "stop" || wasAudible) this.set({ lastBargeInAt: Date.now() });
   }
 
   private onMicFrame(frame: PcmFrame): void {
     const { listen, bargeIn } = this.settings;
     if (listen === "handsfree" && bargeIn !== "off") {
-      if (this.detector.update(frame.rms, performance.now(), this.isAssistantAudible())) this.bargeIn("voice");
+      const voice = this.assistantVoice();
+      if (this.detector.update(frame.rms, performance.now(), voice !== "silent", voice === "interruptible")) this.bargeIn("voice");
     }
     if (this.settings.stt !== "server") return;
     if (listen === "handsfree") {
@@ -325,7 +365,7 @@ export class VoiceEngine {
     if (
       text &&
       this.settings.bargeIn !== "off" &&
-      this.isAssistantAudible() &&
+      this.assistantVoice() === "interruptible" &&
       isLikelyOperatorSpeech(text, this.tts.currentText || this.assistantText)
     ) {
       this.bargeIn("voice");

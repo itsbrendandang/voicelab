@@ -13,10 +13,10 @@ import {
   CalcError,
   cellSeeding,
   checkIncompatibility,
-  convert,
   dilution,
+  findReagent,
   findStep,
-  formatQuantity,
+  formatDuration,
   hazardInfo,
   masterMix,
   molarSolution,
@@ -24,15 +24,16 @@ import {
   percentSolution,
   searchSop,
   serialDilution,
-  speakQuantity,
+  speakDuration,
+  timerRemaining,
+  unitConversion,
   type CalcResult,
   type ExperimentRun,
   type Quantity,
-  type Reagent,
   type Sop,
   type Step,
 } from "@voicelab/core";
-import { parseDuration, speakDuration } from "../util/spoken";
+import { parseDuration } from "../util/spoken";
 
 export interface ToolContext {
   run: ExperimentRun;
@@ -92,25 +93,38 @@ function requireSop(ctx: ToolContext): Sop {
   return sop;
 }
 
-export function findReagent(sop: Sop | undefined, name: string): Reagent | undefined {
-  if (!sop) return undefined;
-  const n = name.trim().toLowerCase();
-  if (!n) return undefined;
-  const names = (r: Reagent) => [r.id, r.name, ...r.aliases].map((s) => s.toLowerCase());
-  return (
-    sop.reagents.find((r) => names(r).includes(n)) ??
-    sop.reagents.find((r) => names(r).some((s) => s.includes(n) || n.includes(s)))
-  );
+interface MwLookup {
+  mw?: number;
+  /** Why no MW is available (reagent not in the SOP, or no MW listed); undefined when none was asked for. */
+  missing?: string;
 }
 
-/** MW from an explicit number or from an SOP reagent; undefined if neither. */
-function resolveMw(ctx: ToolContext, mw: number | undefined, reagent: string | undefined): { mw?: number; note?: string } {
+/**
+ * Molecular weight from an explicit number or from an SOP reagent. Feeds a
+ * calculation, so the reagent must match an SOP name/alias EXACTLY: "Tris-HCl"
+ * must never borrow Tris base's MW, nor "acetic acid" HCl's (alias "acid").
+ */
+function resolveMw(ctx: ToolContext, mw: number | undefined, reagent: string | undefined): MwLookup {
   if (mw !== undefined) return { mw };
-  if (!reagent) return {};
-  const r = findReagent(ctx.run.sop, reagent);
-  if (!r) return { note: `"${reagent}" is not a reagent in the SOP` };
-  if (r.molecularWeight === undefined) return { note: `The SOP does not give a molecular weight for ${r.name}` };
+  if (!reagent?.trim()) return {};
+  const r = findReagent(ctx.run.sop, reagent, { mode: "exact" });
+  if (!r) return { missing: `"${reagent.trim()}" is not a reagent in the SOP, so I have no molecular weight for it` };
+  if (r.molecularWeight === undefined) return { missing: `The SOP does not give a molecular weight for ${r.name}` };
   return { mw: r.molecularWeight };
+}
+
+const ASK_FOR_MW = "Ask the operator for the molecular weight (g/mol) from the bottle or certificate of analysis, then call again with molecular_weight. Never guess it.";
+
+/** Run a calculator; if it fails for want of a molecular weight we couldn't look up, say why and ask for it. */
+function withMw<T>(lookup: MwLookup, fn: () => T): T {
+  try {
+    return fn();
+  } catch (err) {
+    if (lookup.missing && err instanceof CalcError && /molecular weight|\bMW\b/i.test(err.message)) {
+      throw new ToolError(`${lookup.missing}. ${ASK_FOR_MW}`);
+    }
+    throw err;
+  }
 }
 
 export function stepNumber(sop: Sop, stepId: string): number {
@@ -152,12 +166,12 @@ function calcOutput(result: CalcResult): ToolRunResult {
 }
 
 function runningTimers(ctx: ToolContext) {
-  const now = ctx.now?.() ?? Date.now();
+  const now = new Date(ctx.now?.() ?? Date.now());
   return ctx.run.state.timers
     .filter((t) => t.status === "running")
     .map((t) => {
-      const remaining = Math.max(0, Math.round((Date.parse(t.endsAt) - now) / 1000));
-      return { id: t.id, label: t.label, remainingSeconds: remaining, remaining: speakDuration(remaining) };
+      const left = timerRemaining(t, now);
+      return { id: t.id, label: t.label, remainingSeconds: left.seconds, remaining: left.spoken, display: left.display };
     });
 }
 
@@ -255,15 +269,17 @@ const calcDilution = defineTool({
   run(i, ctx) {
     const known = [i.stock_concentration, i.final_concentration, i.stock_volume, i.final_volume].filter((v) => v !== undefined).length;
     if (known !== 3) throw new ToolError(`Need exactly three of the four values (got ${known}).`);
-    const { mw } = resolveMw(ctx, i.molecular_weight, i.reagent);
-    return calcOutput(
-      dilution({
-        stockConcentration: optQ(i.stock_concentration, "stock concentration"),
-        finalConcentration: optQ(i.final_concentration, "final concentration"),
-        stockVolume: optQ(i.stock_volume, "stock volume"),
-        finalVolume: optQ(i.final_volume, "final volume"),
-        molecularWeight: mw,
-      }),
+    const lookup = resolveMw(ctx, i.molecular_weight, i.reagent);
+    return withMw(lookup, () =>
+      calcOutput(
+        dilution({
+          stockConcentration: optQ(i.stock_concentration, "stock concentration"),
+          finalConcentration: optQ(i.final_concentration, "final concentration"),
+          stockVolume: optQ(i.stock_volume, "stock volume"),
+          finalVolume: optQ(i.final_volume, "final volume"),
+          molecularWeight: lookup.mw,
+        }),
+      ),
     );
   },
 });
@@ -292,17 +308,17 @@ const calcSerialDilution = defineTool({
 const calcMolarSolution = defineTool({
   name: "calc_molar_solution",
   description:
-    "Mass of solid to weigh for a molar solution (m = C·V·MW). Pass the SOP `reagent` so its molecular weight is used, or molecular_weight explicitly. Never guess a molecular weight.",
+    "Mass of solid to weigh for a molar solution (m = C·V·MW). Pass the SOP `reagent` (exact SOP name or alias) so its molecular weight is used, or molecular_weight explicitly when the operator gives it. A reagent that is not in the SOP has no molecular weight here: ask the operator. Never guess a molecular weight.",
   schema: z.object({
     concentration: QuantityStr("Target molar concentration"),
     volume: QuantityStr("Final volume"),
-    reagent: z.string().optional().describe("SOP reagent name or alias"),
-    molecular_weight: z.number().positive().optional().describe("g/mol"),
+    reagent: z.string().optional().describe("SOP reagent name or alias, exactly as the SOP lists it"),
+    molecular_weight: z.number().positive().optional().describe("g/mol, as stated by the operator (overrides the SOP lookup)"),
   }),
   run(i, ctx) {
-    const { mw, note } = resolveMw(ctx, i.molecular_weight, i.reagent);
+    const { mw, missing } = resolveMw(ctx, i.molecular_weight, i.reagent);
     if (mw === undefined) {
-      throw new ToolError(`${note ?? "A molecular weight is required"}. Ask the operator for the molecular weight (g/mol) from the bottle.`);
+      throw new ToolError(`${missing ?? "A molecular weight is required"}. ${ASK_FOR_MW}`);
     }
     return calcOutput(molarSolution({ concentration: q(i.concentration, "concentration"), volume: q(i.volume, "volume"), molecularWeight: mw }));
   },
@@ -377,21 +393,10 @@ const convertUnits = defineTool({
     molecular_weight: z.number().positive().optional(),
   }),
   run(i, ctx) {
-    const from = q(i.quantity, "quantity");
-    const { mw } = resolveMw(ctx, i.molecular_weight, i.reagent);
-    const to = convert(from, i.to_unit, mw === undefined ? undefined : { molecularWeight: mw });
-    const result: CalcResult = {
-      kind: "unit-conversion",
-      summary: `${formatQuantity(from)} = ${formatQuantity(to)}`,
-      spoken: `${speakQuantity(from)} is ${speakQuantity(to)}.`,
-      working: [
-        `${formatQuantity(from)} → ${to.unit}${mw !== undefined ? ` (MW ${mw} g/mol)` : ""}`,
-        `= ${formatQuantity(to)}`,
-      ],
-      warnings: [],
-      values: { result: to },
-    };
-    return calcOutput(result);
+    const quantity = q(i.quantity, "quantity");
+    const lookup = resolveMw(ctx, i.molecular_weight, i.reagent);
+    // unitConversion keeps the requested unit ("5 mL -> L" is "0.005 L", not auto-scaled back to mL).
+    return withMw(lookup, () => calcOutput(unitConversion({ quantity, toUnit: i.to_unit, molecularWeight: lookup.mw })));
   },
 });
 
@@ -477,7 +482,7 @@ const startTimer = defineTool({
     }
     label ||= step ? `${step.title} timer` : "Timer";
     const t = ctx.run.startTimer({ label, seconds, stepId: step?.id });
-    return { output: { started: true, id: t.id, label: t.label, duration: speakDuration(seconds), endsAt: t.endsAt } };
+    return { output: { started: true, id: t.id, label: t.label, duration: speakDuration(seconds), display: formatDuration(seconds), endsAt: t.endsAt } };
   },
 });
 

@@ -23,7 +23,6 @@
   "devDependencies": {
     "@types/node": "^22",
     "concurrently": "^9",
-    "tsx": "^4",
     "typescript": "~5.9.3",
     "vitest": "^5"
   }

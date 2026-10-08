@@ -1,5 +1,7 @@
 import { EventEmitter } from "node:events";
-import { describe, expect, it } from "vitest";
+import { createServer, type Server } from "node:http";
+import type { AddressInfo } from "node:net";
+import { afterEach, describe, expect, it } from "vitest";
 import type WebSocket from "ws";
 import { buildDeepgramUrl, DeepgramStt } from "./stt/deepgram";
 import { buildScribeUrl, ElevenLabsStt } from "./stt/elevenlabs";
@@ -36,15 +38,41 @@ class FakeSocket extends EventEmitter {
 }
 
 function recorder() {
-  const log = { partials: [] as string[], finals: [] as string[], errors: [] as string[], speech: 0 };
+  const log = { partials: [] as string[], finals: [] as string[], errors: [] as string[], speech: 0, closes: 0 };
+  let onClosed: () => void = () => {};
+  const closed = new Promise<void>((r) => (onClosed = r));
   const events: SttEvents = {
     onPartial: (t) => log.partials.push(t),
     onFinal: (t) => log.finals.push(t),
     onError: (e) => log.errors.push(e.message),
     onSpeechStart: () => log.speech++,
+    onClose: () => {
+      log.closes++;
+      onClosed();
+    },
   };
-  return { log, events };
+  return { log, events, closed };
 }
+
+/** Local HTTP server that refuses every WebSocket upgrade with `status`. */
+const servers: Server[] = [];
+afterEach(async () => {
+  await Promise.all(servers.splice(0).map((s) => new Promise((r) => s.close(r))));
+});
+async function rejectingServer(status: number, reason: string): Promise<{ url: string; upgrades: () => number }> {
+  let upgrades = 0;
+  const server = createServer((_req, res) => res.writeHead(404).end());
+  server.on("upgrade", (_req, socket) => {
+    upgrades++;
+    socket.end(`HTTP/1.1 ${status} ${reason}\r\nContent-Type: application/json\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}`);
+  });
+  servers.push(server);
+  await new Promise<void>((r) => server.listen(0, "127.0.0.1", r));
+  return { url: `ws://127.0.0.1:${(server.address() as AddressInfo).port}`, upgrades: () => upgrades };
+}
+
+const within = <T>(p: Promise<T>, ms: number, what: string) =>
+  Promise.race([p, new Promise<never>((_r, rej) => setTimeout(() => rej(new Error(`timed out: ${what}`)), ms))]);
 
 const dgOpts = { apiKey: "dg-key", model: "nova-3", language: "en", endpointingMs: 300, utteranceEndMs: 1000 };
 
@@ -100,6 +128,47 @@ describe("Deepgram STT", () => {
 
     stream.close();
     expect(sock.json().at(-1)).toEqual({ type: "CloseStream" });
+  });
+});
+
+describe("STT handshake rejections (real sockets)", () => {
+  it("Deepgram: a 401 ends the stream (no hang in CONNECTING, no retries) so the session can fall back", async () => {
+    const srv = await rejectingServer(401, "Unauthorized");
+    const { log, events, closed } = recorder();
+    const stream = new DeepgramStt({ ...dgOpts, baseUrl: srv.url }).open({ sampleRate: 16000, keyterms: [], events });
+    stream.write(Buffer.alloc(640));
+    await within(closed, 3000, "onClose after 401");
+    expect(log.errors).toEqual(["Deepgram rejected the connection (HTTP 401: API key rejected)"]);
+    expect(log.closes).toBe(1);
+    expect(srv.upgrades()).toBe(1); // bad keys are not retried
+    stream.close(); // harmless afterwards
+  });
+
+  it("Deepgram: 402 (no credit) is fatal too", async () => {
+    const srv = await rejectingServer(402, "Payment Required");
+    const { log, events, closed } = recorder();
+    new DeepgramStt({ ...dgOpts, baseUrl: srv.url }).open({ sampleRate: 16000, keyterms: [], events });
+    await within(closed, 3000, "onClose after 402");
+    expect(log.errors[0]).toMatch(/HTTP 402: out of credit/);
+  });
+
+  it("Deepgram: 429 is retried, then gives up and closes", async () => {
+    const srv = await rejectingServer(429, "Too Many Requests");
+    const { log, events, closed } = recorder();
+    new DeepgramStt({ ...dgOpts, baseUrl: srv.url }).open({ sampleRate: 16000, keyterms: [], events });
+    await within(closed, 8000, "onClose after retries");
+    expect(srv.upgrades()).toBe(4); // first attempt + 3 reconnects
+    expect(log.errors.at(-1)).toMatch(/gave up/);
+    expect(log.closes).toBe(1);
+  }, 10_000);
+
+  it("ElevenLabs Scribe: a 401 ends the stream", async () => {
+    const srv = await rejectingServer(401, "Unauthorized");
+    const { log, events, closed } = recorder();
+    new ElevenLabsStt({ apiKey: "bad", model: "scribe_v2_realtime", baseUrl: srv.url }).open({ sampleRate: 16000, keyterms: [], events });
+    await within(closed, 3000, "onClose after 401");
+    expect(log.errors).toEqual(["ElevenLabs STT rejected the connection (HTTP 401: API key rejected)"]);
+    expect(log.closes).toBe(1);
   });
 });
 
@@ -164,6 +233,22 @@ describe("ElevenLabs TTS", () => {
     expect(calls[0]!.headers["xi-api-key"]).toBe("el-key");
     expect(calls[0]!.body).toMatchObject({ text: "First sentence.", model_id: "eleven_flash_v2_5" });
     expect(calls[1]!.body).toMatchObject({ text: "Second one.", previous_text: "First sentence." });
+  });
+
+  it("reports each sentence once its audio has been fully yielded, in order", async () => {
+    const order: string[] = [];
+    const fetchImpl = (async (_url: string, init: RequestInit) => {
+      const text = JSON.parse(String(init.body)).text as string;
+      return text === "Two." ? new Response("boom", { status: 500 }) : pcmResponse([[1, 2], [3, 4]]);
+    }) as unknown as typeof fetch;
+    const tts = new ElevenLabsTts({ apiKey: "k", voiceId: "v", model: "m", sampleRate: 16000, fetchImpl });
+    await expect(async () => {
+      for await (const b of tts.synthesize(fromArray(["One.", "Two.", "Three."]), new AbortController().signal, { onChunkDone: (t) => order.push(`done:${t}`) })) {
+        order.push(`pcm:${b.length}`);
+      }
+    }).rejects.toBeInstanceOf(TtsError);
+    // "Two." failed (and "Three." was requested ahead) but only "One." finished
+    expect(order).toEqual(["pcm:2", "pcm:2", "done:One."]);
   });
 
   it("surfaces HTTP errors as TtsError and stops quietly on abort", async () => {

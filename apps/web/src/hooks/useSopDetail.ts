@@ -2,11 +2,13 @@
  * Full SOP (instructions, cautions, checks, specs) for the step hero.
  *
  * The WebSocket protocol only carries `SopSummary` and step titles/status, so
- * the detail is fetched from the server's HTTP API. Tolerates either a bare
- * `Sop` or `{ sop: Sop }` and degrades to titles-only when unavailable.
+ * the detail is fetched from the server's HTTP API (carrying the page's access
+ * token, if any). Tolerates either a bare `Sop` or `{ sop: Sop }` and degrades
+ * to titles-only when unavailable.
  */
 import { useEffect, useState } from "react";
 import type { Sop } from "../protocol";
+import { apiUrl } from "../lib/access";
 
 export type SopDetailState =
   | { status: "idle"; sop: null }
@@ -67,7 +69,7 @@ export function useSopDetail(sopId: string | undefined, version: string | undefi
     }
     const ctrl = new AbortController();
     setState((prev) => ({ status: "loading", sop: prev.sop && prev.sop.id === sopId ? prev.sop : null }));
-    fetch(`/api/sops/${encodeURIComponent(sopId)}`, { signal: ctrl.signal, headers: { accept: "application/json" } })
+    fetch(apiUrl(`/api/sops/${encodeURIComponent(sopId)}`), { signal: ctrl.signal, headers: { accept: "application/json" } })
       .then(async (res) => {
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
         const type = res.headers.get("content-type") ?? "";

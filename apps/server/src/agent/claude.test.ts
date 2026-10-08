@@ -1,7 +1,8 @@
 import Anthropic from "@anthropic-ai/sdk";
 import { describe, expect, it } from "vitest";
-import type { ExperimentRun } from "@voicelab/core";
+import { ExperimentRun as Run, type ExperimentRun } from "@voicelab/core";
 import { ClaudeAgent, FALLBACK_BETA, type ClaudeClientLike, type StreamLike } from "./claude";
+import { renderBenchState } from "./bench-state";
 import { AgentUnavailableError } from "./types";
 import { fixtureSop, untilAborted } from "../testing/helpers";
 
@@ -187,5 +188,28 @@ describe("ClaudeAgent", () => {
     await agent.runTurn({ userText: "two", signal: new AbortController().signal, onTextDelta: () => {} });
     expect((requests[1]!.messages as unknown[]).length).toBe(1);
     expect(JSON.stringify(requests[1]!.system)).toContain("No SOP is loaded");
+  });
+
+  it("puts timer time left (from core) in <bench_state> and reports it as backed", async () => {
+    const t0 = Date.parse("2026-10-08T10:00:00.000Z");
+    const run = new Run({ runId: "run-bench", sop: fixtureSop(), now: () => new Date(t0) });
+    run.start();
+    run.startTimer({ label: "Spin", seconds: 300 });
+    const bench = renderBenchState(run, { now: new Date(t0 + 60_000) });
+    expect(bench.text).toMatch(/running_timers:\n {2}- \S+ "Spin": 4 minutes left/);
+    expect(bench.backing).toEqual([{ seconds: 240, spoken: "4 minutes", display: "4:00" }]);
+
+    // the agent hands those values to the session (onBacking) for its number provenance
+    const { client, requests } = fakeClient([{ text: ["About 4 minutes."], final: message([textBlock("About 4 minutes.")], "end_turn") }]);
+    const live = new Run({ runId: "run-bench-live", sop: fixtureSop() });
+    live.start();
+    live.startTimer({ label: "Spin", seconds: 300 });
+    const agent = new ClaudeAgent({ client, model: "m", effort: "low", maxTokens: 100, historyTurns: 24, ctx: { run: live } });
+    const backing: unknown[] = [];
+    await agent.runTurn({ userText: "time left?", signal: new AbortController().signal, onTextDelta: () => {}, onBacking: (b) => backing.push(b) });
+    expect(backing).toHaveLength(1);
+    const [entry] = backing[0] as { seconds: number; spoken: string }[];
+    expect(entry!.seconds).toBeGreaterThan(0);
+    expect((requests[0]!.messages as { content: string }[])[0]!.content).toContain(`"Spin": ${entry!.spoken} left`);
   });
 });

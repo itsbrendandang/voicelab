@@ -1,4 +1,4 @@
-/** Helpers for interpreting spoken numbers and durations. */
+/** Helpers for interpreting spoken numbers and durations (input side only). */
 
 const SMALL: Record<string, number> = {
   zero: 0, oh: 0, one: 1, a: 1, an: 1, two: 2, three: 3, four: 4, five: 5, six: 6, seven: 7, eight: 8, nine: 9,
@@ -51,15 +51,5 @@ export function parseDuration(input: string): number | undefined {
   return matched && total > 0 ? Math.round(total) : undefined;
 }
 
-/** "4 minutes 12 seconds" style phrasing for speech. */
-export function speakDuration(totalSeconds: number): string {
-  const s = Math.max(0, Math.round(totalSeconds));
-  const h = Math.floor(s / 3600);
-  const m = Math.floor((s % 3600) / 60);
-  const sec = s % 60;
-  const parts: string[] = [];
-  if (h) parts.push(`${h} ${h === 1 ? "hour" : "hours"}`);
-  if (m) parts.push(`${m} ${m === 1 ? "minute" : "minutes"}`);
-  if (sec && h === 0) parts.push(`${sec} ${sec === 1 ? "second" : "seconds"}`);
-  return parts.length ? parts.join(" ") : "0 seconds";
-}
+// Spoken/compact duration formatting and timer countdowns live in @voicelab/core
+// (`speakDuration`, `formatDuration`, `timerRemaining`); only parsing is server-side.

@@ -13,11 +13,17 @@ const SessionConfigSchema = z.object({
 const id = z.string().min(1).max(200);
 
 export const ClientMessageSchema = z.discriminatedUnion("type", [
-  z.object({ type: z.literal("session.start"), protocol: z.number(), config: SessionConfigSchema, sopId: id.optional() }),
+  z.object({
+    type: z.literal("session.start"),
+    protocol: z.number(),
+    config: SessionConfigSchema,
+    sopId: id.optional(),
+    resumeRunId: z.string().min(1).max(128).optional(),
+  }),
   z.object({ type: z.literal("session.config"), config: SessionConfigSchema.partial() }),
   z.object({ type: z.literal("user.text"), text: z.string().max(4000), source: z.enum(["typed", "speech"]).optional() }),
   z.object({ type: z.literal("ptt"), state: z.enum(["down", "up"]) }),
-  z.object({ type: z.literal("interrupt") }),
+  z.object({ type: z.literal("interrupt"), scope: z.enum(["turn", "all"]).optional() }),
   z.object({ type: z.literal("sop.select"), sopId: id }),
   z.object({ type: z.literal("step.goto"), stepId: id }),
   z.object({ type: z.literal("step.complete") }),

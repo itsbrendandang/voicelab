@@ -1,3 +1,13 @@
+export interface SynthesisHooks {
+  /**
+   * Called after the last audio buffer of a text chunk has been yielded (in
+   * input order). Providers read text ahead, so this — not "the provider took
+   * it" — is what tells the caller how much was actually delivered when a
+   * stream fails midway.
+   */
+  onChunkDone?(text: string): void;
+}
+
 export interface TtsProvider {
   readonly name: string;
   /** Sample rate of the PCM16 LE mono buffers this provider yields. */
@@ -7,7 +17,7 @@ export interface TtsProvider {
    * normalized for speech). Yields PCM16 LE mono buffers with an even byte
    * length. Must stop promptly (and not throw) when `signal` aborts.
    */
-  synthesize(text: AsyncIterable<string>, signal: AbortSignal): AsyncIterable<Buffer>;
+  synthesize(text: AsyncIterable<string>, signal: AbortSignal, hooks?: SynthesisHooks): AsyncIterable<Buffer>;
 }
 
 /** Reassembles a byte stream into whole 16-bit samples (HTTP chunks can split a sample). */

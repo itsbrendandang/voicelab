@@ -59,6 +59,19 @@ export function buildDeepgramUrl(opts: Pick<DeepgramOptions, "model" | "language
 
 const MAX_RECONNECTS = 3;
 
+/** Rate limits and server errors may clear up; auth/billing/not-found won't. */
+export function isRetryableStatus(status: number): boolean {
+  return status === 408 || status === 429 || status >= 500;
+}
+
+export function describeStatus(status: number): string {
+  if (status === 401) return ": API key rejected";
+  if (status === 402) return ": out of credit";
+  if (status === 403) return ": forbidden";
+  if (status === 429) return ": rate limited";
+  return "";
+}
+
 export class DeepgramStt implements SttProvider {
   readonly name = "deepgram";
   constructor(private readonly opts: DeepgramOptions) {}
@@ -105,14 +118,23 @@ class DeepgramStream implements SttStream {
         this.opts.logger?.debug("deepgram: unparseable message", err);
       }
     });
+    let rejected = false;
     ws.on("error", (err) => {
-      if (this.closed) return;
+      if (this.closed || rejected) return;
       // Never include the URL/headers (keyterms are fine, the key is in a header anyway).
       this.o.events.onError(new Error(`Deepgram connection error: ${err.message}`));
     });
-    ws.on("unexpected-response", (_req, res) => {
-      this.o.events.onError(new Error(`Deepgram rejected the connection (HTTP ${res.statusCode})`));
-      if (res.statusCode === 401 || res.statusCode === 403) this.closed = true; // don't retry bad keys
+    ws.on("unexpected-response", (req, res) => {
+      // With this listener registered `ws` no longer aborts the handshake itself:
+      // without the terminate below the socket would sit in CONNECTING forever.
+      rejected = true;
+      const status = res.statusCode ?? 0;
+      res.resume();
+      this.o.events.onError(new Error(`Deepgram rejected the connection (HTTP ${status}${describeStatus(status)})`));
+      // Bad key / no credit / forbidden / wrong endpoint won't fix themselves: give up now.
+      if (!isRetryableStatus(status)) this.closed = true;
+      ws.terminate(); // -> "close" -> onClose (fatal) or reconnect (429/5xx)
+      req.destroy();
     });
     ws.on("close", () => {
       this.clearTimers();

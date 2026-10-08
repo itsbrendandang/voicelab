@@ -20,7 +20,8 @@ const optionalString = z
 
 const EnvSchema = z.object({
   PORT: z.coerce.number().int().min(0).max(65535).default(8787),
-  HOST: z.string().default("0.0.0.0"),
+  /** Loopback by default; set 0.0.0.0 explicitly (e.g. in Docker) to expose it on the network. */
+  HOST: z.string().default("127.0.0.1"),
   NODE_ENV: z.string().default("development"),
 
   VOICELAB_STT: z.enum(["deepgram", "elevenlabs", "browser"]).default("deepgram"),
@@ -59,7 +60,17 @@ const EnvSchema = z.object({
   VOICELAB_SERVE_WEB: z
     .enum(["auto", "true", "false"])
     .default("auto"),
+
+  /** Extra browser origins allowed to open /ws (comma-separated). Same-origin is always allowed. */
+  VOICELAB_ALLOWED_ORIGINS: optionalString,
+  /** Shared secret: when set, /ws needs ?token= and /api/* needs Authorization: Bearer (or ?token=). */
+  VOICELAB_ACCESS_TOKEN: optionalString,
+  /** How long a run survives with no client attached (reconnect window), in ms. */
+  VOICELAB_RESUME_GRACE_MS: z.coerce.number().int().min(0).default(10 * 60 * 1000),
 });
+
+/** Vite dev server and preview, which proxy /ws and /api to this server. */
+export const DEFAULT_ALLOWED_ORIGINS = ["http://localhost:5173", "http://127.0.0.1:5173", "http://localhost:4173", "http://127.0.0.1:4173"];
 
 export type RawEnv = z.infer<typeof EnvSchema>;
 
@@ -93,8 +104,28 @@ export interface AppConfig {
     /** Undefined when the SDK should resolve credentials itself (ANTHROPIC_AUTH_TOKEN). */
     apiKey?: string;
   };
+  security: {
+    /** Normalized origins (scheme://host[:port]) allowed besides same-origin; "*" allows any. */
+    allowedOrigins: string[];
+    /** Shared secret for /ws and /api/*; undefined = no auth (fine on loopback). */
+    accessToken?: string;
+  };
+  /** Grace period (ms) a detached run is kept for `session.start { resumeRunId }`. 0 = end on disconnect. */
+  resumeGraceMs: number;
   /** Human-readable notes about fallbacks that happened (no secrets). */
   notices: string[];
+}
+
+/** "HTTP://Example.com:80/" -> "http://example.com" (URL origin form); undefined if unparseable. */
+export function normalizeOrigin(origin: string): string | undefined {
+  const o = origin.trim();
+  if (o === "*") return "*";
+  try {
+    const u = new URL(o);
+    return u.origin === "null" ? undefined : u.origin;
+  } catch {
+    return undefined;
+  }
 }
 
 export class ConfigError extends Error {
@@ -172,6 +203,11 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
     sopDir: e.VOICELAB_SOP_DIR ? resolve(e.VOICELAB_SOP_DIR) : DEFAULT_SOP_DIR,
     dataDir: e.VOICELAB_DATA_DIR ? resolve(e.VOICELAB_DATA_DIR) : DEFAULT_DATA_DIR,
     webDist: e.VOICELAB_WEB_DIST ? resolve(e.VOICELAB_WEB_DIST) : DEFAULT_WEB_DIST,
+    security: {
+      allowedOrigins: allowedOrigins(e.VOICELAB_ALLOWED_ORIGINS),
+      ...(e.VOICELAB_ACCESS_TOKEN ? { accessToken: e.VOICELAB_ACCESS_TOKEN } : {}),
+    },
+    resumeGraceMs: e.VOICELAB_RESUME_GRACE_MS,
     stt,
     tts,
     llm: {
@@ -184,6 +220,22 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
     },
     notices,
   };
+}
+
+function allowedOrigins(raw: string | undefined): string[] {
+  if (raw === undefined) return [...DEFAULT_ALLOWED_ORIGINS];
+  const out: string[] = [];
+  for (const part of raw.split(",")) {
+    if (!part.trim()) continue;
+    const o = normalizeOrigin(part);
+    if (!o) throw new ConfigError(`Invalid environment: VOICELAB_ALLOWED_ORIGINS: "${part.trim()}" is not an origin like http://host:port`, ["VOICELAB_ALLOWED_ORIGINS"]);
+    if (!out.includes(o)) out.push(o);
+  }
+  return out;
+}
+
+export function isLoopbackHost(host: string): boolean {
+  return host === "localhost" || host === "::1" || /^127\./.test(host);
 }
 
 /** The `providers` field of `session.ready` / `GET /api/health`. */
@@ -205,6 +257,9 @@ export function logProviders(config: AppConfig, logger: Logger): void {
   logger.info(`TTS : ${p.tts}${config.tts.elevenlabs ? ` (${config.tts.elevenlabs.model}, ${config.tts.elevenlabs.sampleRate} Hz)` : ""}`);
   if (config.stt.provider === "browser" && config.tts.provider === "browser" && config.llm.provider === "offline") {
     logger.warn("Running fully OFFLINE: browser speech in/out + rule-based agent. Add API keys to .env for the full pipeline.");
+  }
+  if (!isLoopbackHost(config.host) && !config.security.accessToken) {
+    logger.warn(`HOST=${config.host} is reachable from the network and VOICELAB_ACCESS_TOKEN is not set: anyone who can reach this port can use the assistant and read run reports.`);
   }
   logger.info("--------------------------------------------------------------");
 }

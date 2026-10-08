@@ -3,9 +3,8 @@
  * system prompt) so the cached prefix — tools + system + SOP + earlier
  * turns — stays byte-identical across turns.
  */
-import type { ExperimentRun, SafetyFinding } from "@voicelab/core";
+import { speakDuration, timerRemaining, type ExperimentRun, type SafetyFinding } from "@voicelab/core";
 import { stepNumber } from "./tools";
-import { speakDuration } from "../util/spoken";
 
 export interface BenchStateExtras {
   safetyFindings?: SafetyFinding[];
@@ -23,11 +22,23 @@ function fmtRange(e: { min?: number; max?: number; target?: number; unit: string
   return parts.join(", ") || "no range";
 }
 
-export function renderBenchState(run: ExperimentRun, extras: BenchStateExtras = {}): string {
+export interface BenchState {
+  text: string;
+  /**
+   * Numbers computed for this block (timer time left) that the model may relay
+   * verbatim. The session registers them with its NumberProvenance so a correct
+   * "about 4 minutes left" isn't flagged. Everything else in the block (readings,
+   * step counts, SOP values) is already backed by run events or the SOP.
+   */
+  backing: unknown[];
+}
+
+export function renderBenchState(run: ExperimentRun, extras: BenchStateExtras = {}): BenchState {
   const now = extras.now ?? new Date();
   const s = run.state;
   const sop = run.sop;
   const lines: string[] = [];
+  const backing: unknown[] = [];
   lines.push(`time: ${now.toISOString().slice(11, 19)} UTC`);
   if (!sop) {
     lines.push("sop: none loaded");
@@ -56,8 +67,9 @@ export function renderBenchState(run: ExperimentRun, extras: BenchStateExtras = 
   if (timers.length) {
     lines.push("running_timers:");
     for (const t of timers) {
-      const left = Math.max(0, (Date.parse(t.endsAt) - now.getTime()) / 1000);
-      lines.push(`  - ${t.id} "${t.label}": ${speakDuration(left)} left`);
+      const left = timerRemaining(t, now);
+      backing.push({ seconds: left.seconds, spoken: left.spoken, display: left.display });
+      lines.push(`  - ${t.id} "${t.label}": ${left.spoken} left`);
     }
   }
 
@@ -76,5 +88,5 @@ export function renderBenchState(run: ExperimentRun, extras: BenchStateExtras = 
     const said = extras.interruptedAfter.trim();
     lines.push(said ? `note: the operator interrupted your previous reply after: "${said.slice(-200)}"` : "note: the operator interrupted your previous reply before you spoke");
   }
-  return lines.join("\n");
+  return { text: lines.join("\n"), backing };
 }
