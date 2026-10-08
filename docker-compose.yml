@@ -1,0 +1,56 @@
+# voicelab in Docker.
+#
+#   cp .env.example .env            # optional: add API keys; with none it runs fully offline
+#   docker compose up --build       # app at http://localhost:8787
+#   docker compose --profile dev up dev   # hot reload: UI on :5173, server on :8787
+#
+# Ports bind to 127.0.0.1 only. To reach it from other devices on the lab network
+# (e.g. a bench tablet), change the host side to "0.0.0.0:8787:8787" AND set
+# VOICELAB_ACCESS_TOKEN in .env, then open http://<host>:8787/?token=<token>.
+# Microphone access in browsers needs https or localhost; put a TLS reverse proxy in front for tablets.
+
+services:
+  voicelab:
+    build: .
+    image: voicelab:local
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      HOST: 0.0.0.0
+      PORT: "8787"
+      VOICELAB_SOP_DIR: /app/sops
+      VOICELAB_DATA_DIR: /data
+    ports:
+      - "127.0.0.1:8787:8787"
+    volumes:
+      - ./sops:/app/sops:ro # edit or add SOPs without rebuilding (restart to reload)
+      - voicelab-data:/data # run logs (JSONL)
+    restart: unless-stopped
+
+  dev:
+    profiles: ["dev"]
+    image: node:22-bookworm-slim
+    working_dir: /app
+    command: >
+      sh -c "npm ci --no-audit --no-fund &&
+             npx concurrently -k -n server,web
+             'npm run dev -w @voicelab/server'
+             'npm run dev -w @voicelab/web -- --host 0.0.0.0'"
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      HOST: 0.0.0.0
+      PORT: "8787"
+    ports:
+      - "127.0.0.1:5173:5173"
+      - "127.0.0.1:8787:8787"
+    volumes:
+      - .:/app
+      # Linux-built node_modules stay inside the container, separate from the host's.
+      - dev-node-modules:/app/node_modules
+
+volumes:
+  voicelab-data:
+  dev-node-modules:

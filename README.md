@@ -46,6 +46,24 @@ SOP and safety tools. For the full pipeline, copy `.env.example` to `.env` and a
 When developing, `npm run dev` runs the server on :8787 and the Vite UI on
 http://localhost:5173 with hot reload.
 
+### Docker
+
+```bash
+cp .env.example .env               # optional; with no keys it runs fully offline
+docker compose up --build          # http://localhost:8787
+docker compose --profile dev up dev   # hot reload: UI :5173, server :8787, source mounted
+```
+
+The image serves the built UI and the server on one port. Keys come from `.env`
+at runtime and are never baked in. SOPs are mounted read-only from `./sops`, so
+you can edit them without rebuilding (restart to reload). Run logs persist in the
+`voicelab-data` volume. Ports bind to `127.0.0.1` by default. To reach the app
+from a bench tablet on the lab network, publish on `0.0.0.0`, set
+`VOICELAB_ACCESS_TOKEN`, open `http://<host>:8787/?token=<token>`, and put TLS
+in front, since browsers only allow the microphone on https or localhost. Behind a
+TLS-inspecting proxy, build with
+`docker build --secret id=extra_ca,src=/path/to/proxy-ca.pem .`.
+
 | Command | What it does |
 |---|---|
 | `npm test` | All unit + integration tests (vitest) |
