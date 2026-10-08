@@ -36,6 +36,7 @@ import {
 } from "./units";
 
 export * from "./types";
+export * from "./time";
 export {
   autoScale,
   compatible as unitsCompatible,

@@ -169,10 +169,106 @@ const NEGATION_RE =
 
 const STORE_RE = /\b(stor(e|ed|ing|age)|shelf|shelve[sd]?|cabinet|kept|keep)\b/;
 
-function negatedBefore(tokens: string[], idx: number, window = 5): boolean {
-  const from = Math.max(0, idx - window);
-  return NEGATION_RE.test(tokens.slice(from, idx).join(" "));
+// ------------------------------------------------------------------ clauses and negation
+
+/** A cleaned sentence split into tokens, with the token index where each token's clause starts. */
+interface Sentence {
+  tokens: string[];
+  clauseStart: number[];
 }
+
+/** Punctuation that ends a clause in the raw text (cleanText turns it into spaces). */
+const CLAUSE_PUNCT_RE = /[,;:()[\]{}]|\s[-–—]+\s|[–—]/;
+/** Words that start a new clause: "never mind, just mix it", "I'll rinse it then pour". */
+const CLAUSE_WORD_RE = /^(but|just|then)$/;
+
+function splitClauses(raw: string, clean: string): Sentence {
+  const tokens = clean.split(" ");
+  const clauseStart = new Array<number>(tokens.length).fill(0);
+  const parts = raw
+    .split(CLAUSE_PUNCT_RE)
+    .map(cleanText)
+    .filter(Boolean);
+  // punctuation boundaries only when the cleaned parts line up token-for-token with the cleaned sentence
+  const punctStarts = new Set<number>();
+  if (parts.join(" ") === clean) {
+    let n = 0;
+    for (const p of parts) {
+      punctStarts.add(n);
+      n += p.split(" ").length;
+    }
+  }
+  let start = 0;
+  tokens.forEach((tok, i) => {
+    // "never, ever pipette by mouth" is one clause
+    if (punctStarts.has(i) && !(i > 0 && tok === "ever")) start = i;
+    if (CLAUSE_WORD_RE.test(tok)) start = i;
+    clauseStart[i] = start;
+  });
+  return { tokens, clauseStart };
+}
+
+/** Negative-looking phrases that don't negate what follows: "don't forget to add", "never mind", "I don't care". */
+const NON_NEGATING_RE =
+  /\b(?:(?:don t|dont|do not) (?:you )?(?:forget|worry|care|mind|hesitate|panic|stress)|never mind|nevermind|why not|no worries|no problem|not only)\b/g;
+
+/** Clause tokens before `idx`, with non-negating idioms blanked out (token count preserved). */
+function clausePrefix(s: Sentence, idx: number): string[] {
+  const text = s.tokens.slice(s.clauseStart[idx] ?? 0, idx).join(" ");
+  return text
+    .replace(NON_NEGATING_RE, (m) => m.replace(/\S+/g, "_"))
+    .split(" ")
+    .filter(Boolean);
+}
+
+/** Words allowed between a negator and the verb it governs: "don't ever mix", "not going to pour", "not a good idea to add". */
+const NEG_FILLER =
+  "ever|even|really|actually|accidentally|directly|immediately|also|go|going|gonna|to|want|wanna|be|try|trying|you|we|i|dare|need|have|should|would|will|can|must|please|think|believe|safe|supposed|allowed|ok|okay|good|a|idea|wise|smart|recommended|permitted";
+const GOVERNING_NEG_RE = new RegExp(
+  `(?:^| )(?:don t|dont|do not|does not|doesn t|did not|didn t|never|neither|not|avoid|avoiding|shouldn t|should not|must not|mustn t|won t|will not|wouldn t|would not|cannot|can t|can not|couldn t|could not|isn t|aren t|wasn t|weren t|stop|without|instead of|rather than|nobody|no one)(?: (?:${NEG_FILLER})){0,4}$`,
+);
+
+/** True when a negator directly governs the word at `idx` in the same clause: "don't mix", "never pour", "won't ever add", "no mixing". */
+function governedByNegation(s: Sentence, idx: number): boolean {
+  const prefix = clausePrefix(s, idx).join(" ");
+  return GOVERNING_NEG_RE.test(prefix) || /(?:^| )no$/.test(prefix);
+}
+
+/** Looser check for practice rules: any negator within `window` tokens before `idx`, same clause, idioms excluded. */
+function negatedInClause(s: Sentence, idx: number, window = Infinity): boolean {
+  const prefix = clausePrefix(s, idx);
+  return NEGATION_RE.test(prefix.slice(Math.max(0, prefix.length - window)).join(" "));
+}
+
+interface VerbHit {
+  token: number;
+  text: string;
+}
+
+/**
+ * Matches of a verb regex that are not negated. Verbs need a negator that governs
+ * them directly; particles ("together", "same waste", "down the") take the negation
+ * of the nearest verb before them in the clause, or of the clause if there is none.
+ */
+function liveVerbs(clean: string, re: RegExp, particle: RegExp, s: Sentence): VerbHit[] {
+  const hits = [...clean.matchAll(re)].map((m) => ({ token: tokenAt(clean, m.index ?? 0), text: m[0], particle: particle.test(m[0]), negated: false }));
+  for (const h of hits) {
+    const clause = s.clauseStart[h.token] ?? 0;
+    const head = hits.filter((v) => !v.particle && v.token < h.token && v.token >= clause).pop();
+    if (h.particle) {
+      h.negated = head ? head.negated : negatedInClause(s, h.token);
+    } else {
+      // "don't mix or pour", "never mix and combine", "neither mix nor pour": the negation carries over
+      const conj = s.tokens[h.token - 1];
+      const coordinated = !!head?.negated && (conj === "or" || conj === "nor" || (conj === "and" && head.token === h.token - 2));
+      h.negated = coordinated || governedByNegation(s, h.token);
+    }
+  }
+  return hits.filter((h) => !h.negated).map(({ token, text }) => ({ token, text }));
+}
+
+const COMBINE_PARTICLE_RE = /^(together|same )/;
+const DRAIN_PARTICLE_RE = /^down the$/;
 
 function isQuestion(raw: string, clean: string): boolean {
   return (
@@ -181,13 +277,103 @@ function isQuestion(raw: string, clean: string): boolean {
   );
 }
 
+interface RuleCtx {
+  s: Sentence;
+  sop?: Sop;
+  stepReagents: Reagent[];
+}
+
 interface PracticeRule {
   id: string;
   level: AlertLevel;
   title: string;
   message: string;
-  test: (clean: string) => RegExpMatchArray | null;
+  test: (clean: string, ctx: RuleCtx) => RegExpMatchArray | null;
   negatable: boolean;
+}
+
+// ------------------------------------------------------------------ skin exposure
+
+const SKIN_EXPOSURE_RE =
+  /\b(?<verb>splash(?:ed|es|ing)?|splatter(?:ed|s)?|spatter(?:ed|s)?|squirt(?:ed|s)?|spill(?:ed|t|s)?|drip(?:s|ped|ping)?|leak(?:ed|s)?|soaked|spray(?:ed|s)?|got|gotten|went)\b(?<middle>(?:\s+\S+){0,6}?)\s+(?<prep>on|onto|in|into|all over|over) (?:my|his|her|their|your) (?<part>face|skin|hands?|arms?|forearms?|mouth|lips?|legs?|neck|wrists?|fingers?|thumbs?|palms?)\b/;
+/** Verbs that by themselves say something landed on the body by accident. */
+const ACCIDENT_VERB_RE = /^(splash|splatter|spatter|squirt|spill|drip|leak|soak)/;
+/** "got the pipette in my hand" is holding, not exposure. */
+const HOLD_PART_RE = /^(hands?|fingers?|thumbs?|palms?|arms?)$/;
+const SENSITIVE_PART_RE = /^(face|mouth|lips?)$/;
+/** Hazard codes that make skin/mouth contact an emergency (corrosive, toxic in contact, sensitizer, CMR, cryogenic). */
+const SKIN_HAZARD_CODE_RE = /^H(281|300|301|310|311|312|314|317|318|340|341|350|351|360|361|370|372|373)/i;
+const SKIN_HAZARD_CLASSES = new Set<ChemClassId>([
+  "hypochlorite",
+  "acid",
+  "strongAcid",
+  "sulfuric",
+  "nitric",
+  "azide",
+  "cyanide",
+  "sulfide",
+  "guanidinium",
+  "phenol",
+  "chloroform",
+  "halogenated",
+  "oxidizer",
+  "peroxide",
+  "piranha",
+  "waterReactive",
+  "strongBase",
+  "volatileToxic",
+]);
+const GENERIC_HAZARD_RE = /\b(chemicals?|corrosive|caustic|toxic|poisonous)\b/;
+const SKIN_INJURY_RE = /\b(burn(s|ed|ing|t)?|stings?|stinging|stung|blister\w*|itch(es|ing|y)?|tingl\w*|numb|irritat\w*|hurts?|hurting|painful|rash)\b/;
+/** Things people deliberately put on their hands, or that are harmless there. */
+const BENIGN_RE =
+  /\b(water|h2o|ddh2o|dh2o|milli q|soap|sanitizer|hand sanitizer|ethanol|etoh|alcohol|isopropanol|ipa|pbs|saline|medium|media|lotion|hand cream|buffer|glycerol)\b/;
+const VAGUE_WORDS = new Set(["some", "it", "a", "little", "bit", "few", "drop", "drops", "of", "stuff", "something", "that", "this", "all", "any", "more", "just", "i", "think", "maybe", "bunch"]);
+
+const skinHazardCodes = (codes: string[]) => codes.flatMap(splitHazardCodes).some((c) => SKIN_HAZARD_CODE_RE.test(c));
+
+/** A chemical in `text` that is dangerous on skin: a hazardous class, a known chemical or SOP reagent with skin-relevant codes. */
+function hazardousOnSkin(text: string, sop: Sop | undefined): boolean {
+  if (GENERIC_HAZARD_RE.test(text)) return true;
+  if (findMentions(text).some((m) => SKIN_HAZARD_CLASSES.has(m.cls))) return true;
+  const padded = ` ${text} `;
+  for (const c of KNOWN_CHEMICALS) {
+    if (!skinHazardCodes(c.hazards)) continue;
+    for (const a of [c.name, ...c.aliases]) {
+      const n = cleanText(a);
+      if ((n.length >= 3 || /\d/.test(n)) && padded.includes(` ${n} `)) return true;
+    }
+  }
+  return !!sop?.reagents.some((r) => skinHazardCodes(r.hazards) && mentionsReagent(text, r));
+}
+
+/**
+ * "I splashed phenol on my hand", "I got the acid on my hand", "phenol got on my skin".
+ * Needs a hazard signal: an accident verb (splash, spill, ...), a hazardous chemical or
+ * SOP reagent, or a symptom ("it burns"). "got the pipette in my hand" and
+ * "sprayed ethanol on my hands" stay quiet.
+ */
+function skinExposure(clean: string, ctx: RuleCtx): RegExpMatchArray | null {
+  const m = clean.match(SKIN_EXPOSURE_RE);
+  if (!m) return null;
+  const { verb = "", middle = "", prep = "", part = "" } = m.groups ?? {};
+  const accident = ACCIDENT_VERB_RE.test(verb);
+  const start = m.index ?? 0;
+  const vt = tokenAt(clean, start);
+  const et = tokenAt(clean, start + m[0].length);
+  const window = ctx.s.tokens.slice(Math.max(0, vt - 6), et + 1).join(" ");
+  const hazardous = hazardousOnSkin(window, ctx.sop);
+  const benign = !hazardous && BENIGN_RE.test(window);
+  const vague = !middle.trim() || middle.trim().split(" ").every((w) => VAGUE_WORDS.has(w));
+
+  if (!accident && /^in(to)?$/.test(prep) && HOLD_PART_RE.test(part)) return null;
+  if (hazardous || SKIN_INJURY_RE.test(clean)) return m;
+  if (benign) return null;
+  if (accident) return m;
+  if (vague && SENSITIVE_PART_RE.test(part)) return m;
+  // "I got some on my hand" while the current step uses a hazardous reagent
+  if (vague && ctx.stepReagents.some((r) => skinHazardCodes(r.hazards))) return m;
+  return null;
 }
 
 const EAT_RE =
@@ -300,10 +486,7 @@ const PRACTICE_RULES: PracticeRule[] = [
     level: "danger",
     title: "Possible chemical skin exposure",
     message: "Rinse the area under running water for 15 minutes and take off contaminated gloves or clothing. Check the SDS, and report it.",
-    test: (t) =>
-      t.match(
-        /\b(splash(ed|es)?|spill(ed|t|s)?|squirt(ed)?|spray(ed)?|spatter(ed)?|got|dripped)\b(\s+\S+){0,6}?\s+(on|onto|in) (my|his|her|their|your) (face|skin|hands?|arms?|mouth|legs?|neck|wrists?|fingers?)\b/,
-      ),
+    test: skinExposure,
     negatable: true,
   },
   {
@@ -311,7 +494,15 @@ const PRACTICE_RULES: PracticeRule[] = [
     level: "danger",
     title: "Sharps injury",
     message: "Let it bleed freely, wash with soap and water for several minutes, then report it right away for follow-up.",
-    test: (t) => t.match(/\b(needle ?stick|stuck myself|stabbed myself|cut myself|cut my (finger|hand|thumb)|pricked myself|poked myself)\b/),
+    test: (t) =>
+      t.match(
+        /\b(needle ?stick|stuck myself|stabbed myself|pricked myself|poked myself|jabbed myself|(cut|sliced) my (finger|hand|thumb|palm|wrist)|(i m|i am|my (finger|hand|thumb|palm|wrist) is) bleeding)\b/,
+      ) ??
+      // "I cut myself on broken glass", but not "cut myself a piece of parafilm"
+      t.match(/\bcut myself\b(?!\s+(a|an|some|another|more|one|two|three|the|this|that|enough|off|out|free|loose|short)\b)/) ??
+      t.match(
+        /\b(needle|scalpel|blade|razor|lancet|glass|shard)\b(\s+\S+){0,3}?\s+(went|got|stuck|poked|pricked|jabbed|slipped|cut)\s+(in|into|through) (my|his|her|your) (finger|hand|thumb|palm|skin|arm|wrist|glove)\b/,
+      ),
     negatable: true,
   },
   {
@@ -377,17 +568,13 @@ export function screenUtterance(text: string, ctx?: { sop?: Sop; currentStepId?:
   for (const raw of sentences) {
     const clean = cleanText(raw);
     if (!clean) continue;
-    const tokens = clean.split(" ");
+    const s = splitClauses(raw, clean);
     const question = isQuestion(raw, clean);
     const mentions = findMentions(clean);
 
-    // 1) intent to combine incompatible chemicals
-    const verbs = [...clean.matchAll(COMBINE_RE)]
-      .map((m) => ({ token: tokenAt(clean, m.index ?? 0), text: m[0] }))
-      .filter((v) => !negatedBefore(tokens, v.token));
-    const drainVerbs = [...clean.matchAll(DRAIN_VERB_RE)]
-      .map((m) => ({ token: tokenAt(clean, m.index ?? 0), text: m[0] }))
-      .filter((v) => !negatedBefore(tokens, v.token));
+    // 1) intent to combine incompatible chemicals ("don't mix" negates; "don't forget to add", "never mind, just mix" don't)
+    const verbs = liveVerbs(clean, COMBINE_RE, COMBINE_PARTICLE_RE, s);
+    const drainVerbs = liveVerbs(clean, DRAIN_VERB_RE, DRAIN_PARTICLE_RE, s);
     const intoDrain = DRAIN_PLACE_RE.test(clean);
 
     const pairMentions = [...mentions];
@@ -426,10 +613,11 @@ export function screenUtterance(text: string, ctx?: { sop?: Sop; currentStepId?:
     }
 
     // 2) unsafe practices and emergencies
+    const ruleCtx: RuleCtx = { s, sop, stepReagents };
     for (const rule of PRACTICE_RULES) {
-      const m = rule.test(clean);
+      const m = rule.test(clean, ruleCtx);
       if (!m) continue;
-      if (rule.negatable && negatedBefore(tokens, tokenAt(clean, m.index ?? 0), 4)) continue;
+      if (rule.negatable && negatedInClause(s, tokenAt(clean, m.index ?? 0), 4)) continue;
       let message = rule.message;
       if (rule.id === "practice:missing-ppe" && sop?.ppe.length) message = `Put your PPE on before you continue. This SOP calls for ${joinSpoken(sop.ppe.slice(0, 4))}.`;
       set.add({ ruleId: rule.id, level: rule.level, title: rule.title, message, matched: [m[0]] });
@@ -437,7 +625,7 @@ export function screenUtterance(text: string, ctx?: { sop?: Sop; currentStepId?:
 
     // 3) volatile/toxic work outside the hood
     const open = clean.match(OPEN_BENCH_RE);
-    if (open && !negatedBefore(tokens, tokenAt(clean, open.index ?? 0), 3)) {
+    if (open && !negatedInClause(s, tokenAt(clean, open.index ?? 0), 3)) {
       const vol = mentions.find((x) => x.cls === "volatileToxic");
       const reagentHood = stepReagents.find((r) => mentionsReagent(clean, r) && r.hazards.some((h) => /^H(330|331|332|335|336|350i|370)/.test(h)));
       if (vol || reagentHood) {

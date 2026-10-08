@@ -44,7 +44,11 @@ export interface ProviderInfo {
 // ---------------------------------------------------------------- client -> server
 
 export type ClientMessage =
-  | { type: "session.start"; protocol: number; config: SessionConfig; sopId?: string }
+  /**
+   * `resumeRunId`: after a reconnect, re-attach to that run (step, readings, timers)
+   * if the server still holds it; otherwise a fresh run starts.
+   */
+  | { type: "session.start"; protocol: number; config: SessionConfig; sopId?: string; resumeRunId?: string }
   | { type: "session.config"; config: Partial<SessionConfig> }
   /**
    * Typed input, or a final transcript produced by browser STT. `source` lets the
@@ -54,7 +58,11 @@ export type ClientMessage =
   | { type: "user.text"; text: string; source?: "typed" | "speech" }
   | { type: "ptt"; state: "down" | "up" }
   /** Barge-in: stop speaking and abandon the in-flight assistant turn. */
-  | { type: "interrupt" }
+  /**
+   * Barge-in. scope "turn" (default) stops the assistant's reply but lets urgent
+   * safety speech finish; "all" (explicit Stop) silences everything.
+   */
+  | { type: "interrupt"; scope?: "turn" | "all" }
   | { type: "sop.select"; sopId: string }
   | { type: "step.goto"; stepId: string }
   | { type: "step.complete" }
@@ -90,7 +98,8 @@ export interface ToolTrace {
 }
 
 export type ServerMessage =
-  | { type: "session.ready"; sessionId: string; protocol: number; providers: ProviderInfo; config: SessionConfig; sops: SopSummary[] }
+  /** `resumed` is true when `resumeRunId` re-attached an existing run. */
+  | { type: "session.ready"; sessionId: string; runId: string; resumed: boolean; protocol: number; providers: ProviderInfo; config: SessionConfig; sops: SopSummary[] }
   | { type: "transcript"; text: string; final: boolean }
   /** User utterance ignored (e.g. wake phrase missing). */
   | { type: "transcript.ignored"; text: string; reason: string }
@@ -98,7 +107,8 @@ export type ServerMessage =
   | { type: "assistant.delta"; turnId: string; text: string }
   | { type: "assistant.done"; turnId: string; text: string; interrupted: boolean }
   /** Binary PCM16 frames for this turn follow until `tts.end`. */
-  | { type: "tts.start"; turnId: string; sampleRate: number }
+  /** Urgent (safety) audio must survive a "turn"-scoped barge-in on the client too. */
+  | { type: "tts.start"; turnId: string; sampleRate: number; priority: "normal" | "urgent" }
   | { type: "tts.end"; turnId: string }
   /** For `tts: "browser"`: client should speak this with speechSynthesis. */
   | { type: "speak"; turnId: string; text: string; priority: "normal" | "urgent" }

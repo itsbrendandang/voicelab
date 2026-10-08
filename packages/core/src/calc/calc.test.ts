@@ -4,6 +4,7 @@ import {
   cellSeeding,
   convert,
   dilution,
+  formatDuration,
   formatQuantity,
   masterMix,
   molarSolution,
@@ -11,8 +12,10 @@ import {
   parseQuantity,
   percentSolution,
   serialDilution,
+  speakDuration,
   speakQuantity,
   suggestPipette,
+  timerRemaining,
   unitConversion,
   type CalcResult,
 } from "./index";
@@ -350,5 +353,63 @@ describe("unitConversion", () => {
     expect(r.kind).toBe("unit-conversion");
     expect(r.values.to).toEqual({ value: 50, unit: "µM" });
     expect(r.spoken).toBe("0.05 millimolar is 50 micromolar.");
+  });
+});
+
+describe("durations and timers", () => {
+  it.each([
+    [0, "0 seconds", "0:00"],
+    [1, "1 second", "0:01"],
+    [45, "45 seconds", "0:45"],
+    [60, "1 minute", "1:00"],
+    [61, "1 minute 1 second", "1:01"],
+    [252, "4 minutes 12 seconds", "4:12"],
+    [600, "10 minutes", "10:00"],
+    [3599, "59 minutes 59 seconds", "59:59"],
+    [3600, "1 hour", "1:00:00"],
+    [3601, "1 hour", "1:00:01"],
+    [5400, "1 hour 30 minutes", "1:30:00"],
+    [5459, "1 hour 30 minutes", "1:30:59"],
+    [7200, "2 hours", "2:00:00"],
+    [36000 + 65, "10 hours 1 minute", "10:01:05"],
+  ])("%d s -> %s / %s", (sec, spoken, display) => {
+    expect(speakDuration(sec)).toBe(spoken);
+    expect(formatDuration(sec)).toBe(display);
+  });
+
+  it("rounds fractional input and clamps negatives and non-finite values to zero", () => {
+    expect(speakDuration(89.6)).toBe("1 minute 30 seconds");
+    expect(formatDuration(89.4)).toBe("1:29");
+    expect(speakDuration(-5)).toBe("0 seconds");
+    expect(formatDuration(-5)).toBe("0:00");
+    expect(speakDuration(Number.NaN)).toBe("0 seconds");
+    expect(formatDuration(Number.POSITIVE_INFINITY)).toBe("0:00");
+  });
+
+  describe("timerRemaining", () => {
+    const endsAt = "2026-10-08T12:10:00.000Z";
+    const at = (iso: string) => new Date(iso);
+    const running = { endsAt, status: "running" as const };
+
+    it("counts whole seconds left, rounding up", () => {
+      expect(timerRemaining(running, at("2026-10-08T12:05:48.000Z"))).toEqual({ seconds: 252, display: "4:12", spoken: "4 minutes 12 seconds" });
+      expect(timerRemaining(running, at("2026-10-08T12:05:48.001Z")).seconds).toBe(252);
+      expect(timerRemaining(running, at("2026-10-08T12:05:47.999Z")).seconds).toBe(253);
+      expect(timerRemaining(running, at("2026-10-08T10:40:00.000Z"))).toEqual({ seconds: 5400, display: "1:30:00", spoken: "1 hour 30 minutes" });
+    });
+
+    it("shows at least 1 second until the timer truly ends, then 0", () => {
+      expect(timerRemaining(running, at("2026-10-08T12:09:59.999Z"))).toEqual({ seconds: 1, display: "0:01", spoken: "1 second" });
+      expect(timerRemaining(running, at(endsAt))).toEqual({ seconds: 0, display: "0:00", spoken: "0 seconds" });
+      expect(timerRemaining(running, at("2026-10-08T12:10:05.000Z")).seconds).toBe(0);
+    });
+
+    it("is 0 when the timer is not running or the times are invalid", () => {
+      const early = at("2026-10-08T12:00:00.000Z");
+      expect(timerRemaining({ endsAt, status: "fired" }, early).seconds).toBe(0);
+      expect(timerRemaining({ endsAt, status: "cancelled" }, early)).toEqual({ seconds: 0, display: "0:00", spoken: "0 seconds" });
+      expect(timerRemaining({ endsAt: "not a date", status: "running" }, early).seconds).toBe(0);
+      expect(timerRemaining(running, new Date(Number.NaN)).seconds).toBe(0);
+    });
   });
 });

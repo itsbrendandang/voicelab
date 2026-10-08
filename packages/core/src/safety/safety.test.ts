@@ -91,6 +91,31 @@ describe("screenUtterance: true positives", () => {
     ["I'll do the chloroform extraction on the open bench", "practice:fume-hood", "warning"],
     ["I can smell chlorine", "practice:fumes", "warning"],
     ["the centrifuge is unbalanced but I'll spin anyway", "practice:centrifuge-balance", "warning"],
+    // exposures still fire when there is a hazard or accident signal
+    ["I got the acid on my hand", "emergency:exposure-skin", "danger"],
+    ["phenol got on my skin", "emergency:exposure-skin", "danger"],
+    ["I got TRIzol on my hand", "emergency:exposure-skin", "danger"],
+    ["I sprayed bleach on my hands", "emergency:exposure-skin", "danger"],
+    ["it splashed on my arm", "emergency:exposure-skin", "danger"],
+    ["I spilled some on my hand", "emergency:exposure-skin", "danger"],
+    ["I got some on my hand and it burns", "emergency:exposure-skin", "danger"],
+    ["I got some in my mouth", "emergency:exposure-skin", "danger"],
+    ["I got liquid nitrogen on my hand", "emergency:exposure-skin", "danger"],
+    ["I splashed bleach in my eye", "emergency:exposure-eye", "danger"],
+    ["I cut myself on broken glass", "emergency:sharps-injury", "danger"],
+    ["I cut myself", "emergency:sharps-injury", "danger"],
+    ["the needle went into my finger", "emergency:sharps-injury", "danger"],
+    ["my finger is bleeding", "emergency:sharps-injury", "danger"],
+    // phrases that look negative but don't negate the combine verb
+    ["Don't forget to add the bleach to the acid waste", "incompat:bleach-acid", "danger"],
+    ["never mind, just mix the bleach with the acid", "incompat:bleach-acid", "danger"],
+    ["I don't care, pour the bleach into the acid waste", "incompat:bleach-acid", "danger"],
+    ["don't worry, pour the bleach into the acid waste", "incompat:bleach-acid", "danger"],
+    ["make sure to add the bleach to the acid waste", "incompat:bleach-acid", "danger"],
+    ["remember to pour the bleach into the acid", "incompat:bleach-acid", "danger"],
+    ["I won't mix them, but pour the bleach into the acid waste", "incompat:bleach-acid", "danger"],
+    ["never mind the timer, add HCl to the azide solution", "incompat:azide-acid", "danger"],
+    ["never mind, I'll just mouth pipette it", "practice:mouth-pipetting", "danger"],
   ])("%s", (text, rule, level) => {
     const fs = screenUtterance(text);
     expect(levels(fs)).toContain(`${level}:${rule}`);
@@ -109,6 +134,49 @@ describe("screenUtterance: true positives", () => {
     expect(screenUtterance("Don't ever mix bleach with acid")).toEqual([]);
     expect(screenUtterance("never mouth pipette")).toEqual([]);
     expect(screenUtterance("make sure you do not pour azide down the drain")).toEqual([]);
+  });
+
+  it.each([
+    "never mix bleach and acid",
+    "don't pour bleach into the acid waste",
+    "do not add the bleach to the acid waste",
+    "you shouldn't combine bleach with acid",
+    "we won't mix bleach and acid",
+    "don't mix bleach and acid together",
+    "never put bleach and acid in the same waste container",
+    "Bleach and acid don't go together",
+    "it's not safe to mix bleach and acid",
+    "I don't think I should mix the bleach with the acid",
+    "no mixing bleach and acid",
+    "don't worry, I won't mix the bleach with the acid",
+    "stop, don't mix the bleach with the acid",
+    "don't mix or pour bleach into acid",
+    "avoid mixing or pouring bleach into the acid waste",
+    "don't mix bleach with acid or pour it into the acid waste",
+    "neither mix nor pour bleach into acid",
+    "I'm not going to pour the azide down the sink",
+    "the azide never goes down the drain",
+    "You should never, ever pipette by mouth",
+    "I didn't get any on my skin",
+    "be careful not to splash acid on your hands",
+  ])("treats a negator that governs the verb as negation: %s", (text) => {
+    expect(screenUtterance(text).filter((f) => f.level !== "info")).toEqual([]);
+  });
+
+  it("only uses the current step's hazardous reagents for a vague 'got some on my hand'", () => {
+    const sop = parseSop(`
+id: acid
+title: Acid step
+reagents:
+  - { id: conc-hcl, name: Concentrated HCl, aliases: [HCl], hazards: [H290, H314, H335] }
+  - { id: water, name: Water }
+steps:
+  - { id: pour, title: Add acid, instruction: Add the HCl to the water., reagents: [conc-hcl, water] }
+  - { id: rinse, title: Rinse, instruction: Rinse with water., reagents: [water] }
+`);
+    expect(screenUtterance("I got some on my hand")).toEqual([]);
+    expect(screenUtterance("I got some on my hand", { sop, currentStepId: "rinse" })).toEqual([]);
+    expect(levels(screenUtterance("I got some on my hand", { sop, currentStepId: "pour" }))).toContain("danger:emergency:exposure-skin");
   });
 
   it("uses current-step reagents to resolve 'the waste'", () => {
@@ -158,6 +226,21 @@ describe("screenUtterance: ordinary lab talk raises no danger", () => {
     "dilute the bleach in water to ten percent",
     "the plate is on the bench next to the reader",
     "eat lunch after you finish the gel",
+    // holding things, hand sanitizing, cutting supplies: not exposures or injuries
+    "I've got the pipette in my hand",
+    "got the tube in my hand",
+    "I've got the HCl bottle in my hand",
+    "I've got gloves on my hands",
+    "I sprayed ethanol on my hands",
+    "I splashed some water on my face",
+    "I spilled the medium on my hands",
+    "I got Tris on my hands",
+    "I got some on my hand",
+    "cut myself a piece of parafilm",
+    "I'm cutting myself a strip of parafilm",
+    "the bands are bleeding into each other",
+    "don't forget to set a timer",
+    "never mind, what's the next step",
   ];
   it.each(ordinary)("%s", (text) => {
     const fs = screenUtterance(text);
