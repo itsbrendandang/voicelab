@@ -1,0 +1,22 @@
+{
+  "name": "@voicelab/web",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Bench-side UI: hands-free voice, SOP step view, calculations, safety alerts, run timeline.",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "react": "^19.3.0",
+    "react-dom": "^19.3.0"
+  },
+  "devDependencies": {
+    "@types/react": "^19",
+    "@types/react-dom": "^19",
+    "@vitejs/plugin-react": "^6",
+    "vite": "^8"
+  }
+}

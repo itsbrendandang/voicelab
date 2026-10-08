@@ -1,0 +1,21 @@
+{
+  "name": "@voicelab/server",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Realtime voice pipeline: STT -> Claude agent with lab tools -> TTS, over WebSocket.",
+  "scripts": {
+    "dev": "tsx watch --env-file-if-exists=../../.env src/index.ts",
+    "start": "tsx --env-file-if-exists=../../.env src/index.ts",
+    "sop:import": "tsx --env-file-if-exists=../../.env src/cli/import-sop.ts"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.132.0",
+    "dotenv": "^18.0.6",
+    "ws": "^8.22.0",
+    "zod": "^4.6.5"
+  },
+  "devDependencies": {
+    "@types/ws": "^8.18.2"
+  }
+}

@@ -1,0 +1,15 @@
+{
+  "name": "@voicelab/core",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Lab domain core: calculators, SOP schema/retrieval, safety rules, experiment state, client/server protocol.",
+  "exports": {
+    ".": "./src/index.ts",
+    "./node": "./src/node.ts"
+  },
+  "dependencies": {
+    "yaml": "^2.9.1",
+    "zod": "^4.6.5"
+  }
+}

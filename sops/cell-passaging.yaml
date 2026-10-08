@@ -1,0 +1,266 @@
+# DEMO CONTENT for voicelab development and testing. Not a validated protocol.
+# Typical HEK293 passaging in a T75 flask. Follow your institution's biosafety
+# approvals, the cell bank's handling sheet and the SDSs for real work.
+id: cell-passaging
+title: HEK293 Passaging (T75 flask)
+version: "1.1"
+domain: cell culture
+summary: >
+  Detach a 70–90% confluent HEK293 T75 flask with 0.05% trypsin-EDTA, count viable
+  cells with trypan blue, and reseed new flasks or plates at a defined density.
+  BSL-2 work in a class II biosafety cabinet.
+ppe:
+  - Lab coat (cuffed, cell culture only)
+  - Nitrile gloves
+  - Safety glasses
+equipment:
+  - Class II biosafety cabinet (BSC)
+  - 37 °C, 5% CO2 humidified incubator
+  - 37 °C water or bead bath
+  - Inverted microscope
+  - Hemocytometer or automated cell counter
+  - Serological pipettes and pipette aid
+  - 15 mL conical tubes
+  - T75 flasks or multiwell plates
+  - Aspirator with a waste flask
+reagents:
+  - id: medium
+    name: Complete DMEM (high glucose, 10% FBS, 1% penicillin-streptomycin)
+    aliases: [medium, media, DMEM, complete medium, growth medium]
+    storage: 2–8 °C, protected from light. Use within 4 weeks.
+  - id: dpbs
+    name: DPBS without calcium and magnesium
+    aliases: [PBS, DPBS, wash buffer]
+    notes: Must be Ca/Mg-free or cells will stay attached.
+  - id: trypsin
+    name: 0.05% Trypsin-EDTA
+    aliases: [trypsin, trypsin EDTA, TrypLE]
+    storage: -20 °C in aliquots; 2–8 °C once thawed. Don't leave it at 37 °C for long.
+  - id: trypan-blue
+    name: Trypan blue, 0.4%
+    aliases: [trypan blue, trypan, blue dye, viability dye]
+    hazards: [H350]
+    notes: Carcinogen. Gloves on, avoid aerosols, and dispose of counting slides as chemical-contaminated waste.
+  - id: ethanol-70
+    name: 70% ethanol
+    aliases: [ethanol, 70% ethanol, EtOH, alcohol spray]
+    hazards: [H225, H319]
+    notes: Flammable. Never use near a flame in the BSC.
+  - id: bleach
+    name: Bleach (sodium hypochlorite, for 10% final in liquid waste)
+    aliases: [bleach, hypochlorite, sodium hypochlorite]
+    hazards: [H315, H319, EUH031]
+    notes: Never mix with acids or ammonia. Prepare fresh dilutions.
+steps:
+  - id: warm
+    title: Warm medium, DPBS and trypsin
+    instruction: >
+      Warm complete medium and DPBS to 37 °C in the water bath for about 15 minutes.
+      Bring trypsin just to room temperature, or warm it only briefly. Wipe bottles
+      with 70% ethanol before they go into the cabinet.
+    spoken: Warm the medium and PBS in the water bath for about fifteen minutes. Trypsin only needs to reach room temperature.
+    reagents: [medium, dpbs, trypsin]
+    timer: { seconds: 900, label: Warm media }
+  - id: prepare-bsc
+    title: Prepare the biosafety cabinet
+    instruction: >
+      Turn on the BSC and let it run for 5 minutes. Wipe the work surface with 70% ethanol.
+      Load only what you need and keep the front grille clear. Don't use open flames.
+    spoken: Start the cabinet, give it five minutes, and wipe it down with seventy percent ethanol.
+    reagents: [ethanol-70]
+    caution: Keep ethanol away from any heat source. Never use a Bunsen burner in a BSC.
+    checks:
+      - Airflow alarm silent and sash at the marked height
+      - Work surface wiped and dry
+    timer: { seconds: 300, label: BSC purge }
+  - id: inspect
+    title: Inspect the culture
+    instruction: >
+      Check the flask under the microscope. Estimate confluence and look for contamination:
+      cloudy medium, a sudden yellow color, floating particles, or moving specks. Note the
+      passage number. Retire HEK293 cultures after passage 30.
+    spoken: Check the cells under the scope. What's the confluence, and any sign of contamination?
+    measurements:
+      - id: confluence
+        label: Confluence
+        unit: "%"
+        min: 70
+        max: 90
+        target: 80
+        outOfRangeHint: >
+          Below 70% you can wait a day or split at a lower ratio. Above 90% HEK293 start
+          to clump and detach on their own, so passage now and seed lower next time.
+      - id: passage-number
+        label: Passage number
+        unit: passages
+        max: 30
+        outOfRangeHint: High-passage HEK293 drift in morphology and transfection efficiency. Thaw a fresh vial.
+    checks:
+      - No signs of contamination
+      - Passage number recorded
+  - id: wash
+    title: Aspirate medium and rinse with DPBS
+    instruction: >
+      Aspirate the medium into the waste flask. Add 5 mL DPBS gently down the side
+      of the flask (HEK293 lift easily), rock once, and aspirate.
+    spoken: Aspirate the medium, then rinse gently with five mils of PBS down the side and aspirate.
+    reagents: [dpbs]
+    checks:
+      - DPBS is calcium- and magnesium-free
+  - id: trypsinize
+    title: Add trypsin and detach cells
+    instruction: >
+      Add 2 mL 0.05% trypsin-EDTA, rock to cover the surface, and incubate at 37 °C for
+      2–3 minutes. Tap the flask gently and check that most cells have rounded up and
+      detached. Do not exceed 5 minutes.
+    spoken: Add two mils of trypsin, rock to cover, and put it in the incubator for two to three minutes.
+    reagents: [trypsin]
+    caution: Over-trypsinization damages surface proteins and lowers viability.
+    checks:
+      - At least 90% of cells detached and rounded
+    timer: { seconds: 180, label: Trypsin }
+  - id: neutralize
+    title: Neutralize and collect cells
+    instruction: >
+      Add 8 mL complete medium to inactivate the trypsin. Pipette gently over the
+      surface 5–8 times to break up clumps, and transfer the suspension to a 15 mL tube.
+    spoken: Add eight mils of complete medium, pipette gently to break up clumps, and move it to a fifteen mil tube.
+    reagents: [medium]
+    checks:
+      - Single-cell suspension with no visible clumps
+  - id: count
+    title: Count viable cells
+    critical: true
+    instruction: >
+      Mix 10 µL cell suspension with 10 µL 0.4% trypan blue (1:1). Load 10 µL onto the
+      hemocytometer and count the four corner squares. Viable cells/mL = average count
+      per square × 2 (dilution) × 10^4. Viability = unstained / total × 100. Viability
+      must be at least 90% to use the cells for experiments.
+    spoken: Mix ten microliters of cells with ten of trypan blue and count. Tell me the viable cells per mil and the viability.
+    reagents: [trypan-blue]
+    caution: Trypan blue is a carcinogen. Gloves on, and wipe up any spills right away.
+    measurements:
+      - id: viable-density
+        label: Viable cell density
+        unit: cells/mL
+        min: 500000
+        max: 4000000
+        target: 1500000
+        outOfRangeHint: >
+          A low count usually means cells were lost in the rinse, detachment was incomplete,
+          or the culture was sparse. A very high count suggests a counting or dilution-factor error.
+      - id: viability
+        label: Viability (trypan blue)
+        unit: "%"
+        min: 90
+        max: 100
+        outOfRangeHint: >
+          Below 90% the cells are stressed, often from over-trypsinization, an overgrown
+          culture, rough pipetting, or contamination. Record it, and don't use these cells
+          for sensitive experiments.
+    checks:
+      - Counted at least 100 cells
+      - Hemocytometer and counting slide disposed as chemical-contaminated waste
+  - id: seed
+    title: Seed new flasks or plates
+    instruction: >
+      Seed new T75 flasks with 2 × 10^6 viable cells in 15 mL complete medium (about
+      2.7 × 10^4 cells/cm²), or 6-well plates at 3 × 10^5 cells/well in 2 mL. Use the
+      seeding calculator for volumes. Label vessels with cell line, passage number
+      (+1), date and initials.
+    spoken: Seed at two million cells per T75 in fifteen mils, or three hundred thousand per well of a six-well plate. Ask me for the volumes.
+    reagents: [medium]
+    checks:
+      - Vessels labeled with cell line, passage, date and initials
+      - Suspension mixed between vessels
+  - id: incubate
+    title: Distribute and incubate
+    instruction: >
+      Rock flasks gently in a cross pattern to spread the cells evenly. Place them in the
+      37 °C, 5% CO2 incubator. Check the incubator display.
+    spoken: Rock the flasks in a cross pattern and put them in the incubator. Read me the temperature and CO2.
+    measurements:
+      - id: incubator-temp
+        label: Incubator temperature
+        unit: °C
+        min: 36.5
+        max: 37.5
+        target: 37
+        outOfRangeHint: The incubator is out of range. Check the door seal and display, then tell the incubator owner.
+      - id: incubator-co2
+        label: Incubator CO2
+        unit: "%"
+        min: 4.5
+        max: 5.5
+        target: 5
+        outOfRangeHint: CO2 out of range shifts the medium's pH. Check the gas supply and tank pressure.
+  - id: decontaminate
+    title: Decontaminate waste and the cabinet
+    critical: true
+    instruction: >
+      Add bleach to the aspirated liquid waste to 10% final and leave at least 30
+      minutes before disposal. Wipe the BSC with 70% ethanol, close the sash, and put
+      serological pipettes and flasks in the biohazard waste.
+    spoken: Bleach the liquid waste to ten percent for thirty minutes, wipe the cabinet down with ethanol, and bin the plastics as biohazard.
+    reagents: [bleach, ethanol-70]
+    caution: Don't add bleach to waste that contains acids or ammonium salts.
+    checks:
+      - Bleach added to 10% final
+      - Cabinet wiped and sash closed
+    timer: { seconds: 1800, label: Bleach contact time }
+troubleshooting:
+  - symptom: Low viability (below 90%)
+    likelyCauses:
+      - Over-trypsinization (more than 5 minutes or warm trypsin left too long)
+      - Culture overgrown before passaging
+      - Harsh pipetting or foaming
+      - Contamination
+    actions:
+      - Shorten the trypsin time and check detachment every minute
+      - Passage at 80% confluence
+      - Pipette gently along the flask wall
+    relatedSteps: [trypsinize, neutralize, count, inspect]
+  - symptom: Cells not detaching
+    likelyCauses:
+      - DPBS with calcium and magnesium was used
+      - Old or inactive trypsin
+      - Medium not fully removed (serum inhibits trypsin)
+    actions:
+      - Use Ca/Mg-free DPBS
+      - Use a fresh trypsin aliquot and give 1–2 more minutes
+    relatedSteps: [wash, trypsinize]
+  - symptom: Cells clumping
+    likelyCauses:
+      - DNA released from dead cells
+      - Over-confluent culture
+      - Not enough trituration
+    actions:
+      - Pipette gently to break clumps or pass through a 40 µm strainer
+      - Passage before 90% confluence
+    relatedSteps: [neutralize, inspect]
+  - symptom: Count much lower than expected
+    likelyCauses:
+      - Cells lost during the DPBS rinse
+      - Incomplete detachment
+      - Counting error or wrong dilution factor
+    actions:
+      - Check the flask for remaining attached cells
+      - Recount with a fresh sample, mixing first
+      - Confirm the trypan blue dilution factor (×2)
+    relatedSteps: [wash, trypsinize, count]
+  - symptom: Cloudy or yellow medium (possible contamination)
+    likelyCauses:
+      - Bacterial or yeast contamination
+      - Poor aseptic technique or a dirty incubator
+    actions:
+      - Don't passage. Bleach the flask and dispose of it.
+      - Check other cultures from the same reagents and decontaminate the incubator
+    relatedSteps: [inspect, prepare-bsc]
+waste: >
+  Liquid waste gets bleach to 10% final and 30 minutes of contact before it goes down
+  the drain with water, if local rules allow. Never add bleach to waste containing
+  acids or ammonium salts. Pipettes, tips and flasks go in biohazard bags for
+  autoclaving. Trypan blue counting slides go in chemical-contaminated sharps or solid waste.
+references:
+  - ATCC CRL-1573 (HEK-293) culture method
+  - Institutional BSL-2 biosafety manual
