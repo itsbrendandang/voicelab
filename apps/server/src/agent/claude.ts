@@ -112,7 +112,7 @@ export class ClaudeAgent implements LabAgent {
       .join("\n");
   }
 
-  async runTurn({ userText, signal, onTextDelta, onToolCall, onToolResult, context }: RunTurnOptions): Promise<string> {
+  async runTurn({ userText, signal, onTextDelta, onToolCall, onToolResult, onBacking, context }: RunTurnOptions): Promise<string> {
     const run = this.opts.ctx.run;
     if (this.system === undefined || this.convoSopKey !== sopKey(run.sop)) {
       // New SOP => new system prompt => new conversation (never edit `system` mid-conversation).
@@ -124,7 +124,8 @@ export class ClaudeAgent implements LabAgent {
 
     const bench = renderBenchState(run, { safetyFindings: context?.safetyFindings, interruptedAfter: this.interruptedAfter });
     this.interruptedAfter = undefined;
-    const parts = [`<bench_state>\n${bench}\n</bench_state>`];
+    if (bench.backing.length) onBacking?.(bench.backing);
+    const parts = [`<bench_state>\n${bench.text}\n</bench_state>`];
     const summary = this.pendingSummary;
     if (summary) parts.unshift(`<conversation_summary>\n${summary}\n</conversation_summary>`);
     this.pendingSummary = undefined;

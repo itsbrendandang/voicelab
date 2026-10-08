@@ -1,10 +1,13 @@
+import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
-import { ExperimentRun } from "@voicelab/core";
+import { ExperimentRun, parseSop, type Sop } from "@voicelab/core";
 import { anthropicToolDefs, executeTool, isCalcTool, TOOL_NAMES, type ToolContext } from "./tools";
 import { fixtureSop } from "../testing/helpers";
 
 /** Calc tools only need `run.sop`; avoid depending on ExperimentRun for them. */
-const sopOnlyCtx = (): ToolContext => ({ run: { sop: fixtureSop() } as unknown as ExperimentRun });
+const sopOnlyCtx = (sop: Sop = fixtureSop()): ToolContext => ({ run: { sop } as unknown as ExperimentRun });
+/** The shipped Tris SOP: reagents "Tris base" (MW 121.14) and concentrated HCl (alias "acid"); no Tris-HCl. */
+const trisSop = () => parseSop(readFileSync(new URL("../../../../sops/tris-buffer-prep.yaml", import.meta.url), "utf8"));
 
 function runCtx(): ToolContext {
   const run = new ExperimentRun({ runId: "run-test", sop: fixtureSop() });
@@ -108,7 +111,55 @@ describe("tool registry: validation and dispatch", () => {
     const r = executeTool("convert_units", { quantity: "1.5 mL", to_unit: "µL" }, sopOnlyCtx());
     expect(r.ok).toBe(true);
     expect(r.calc?.kind).toBe("unit-conversion");
-    expect(r.calc?.values.result).toEqual({ value: 1500, unit: "µL" });
+    expect(r.calc?.values.to).toEqual({ value: 1500, unit: "µL" });
+  });
+
+  it("convert_units keeps the requested unit instead of auto-scaling back", () => {
+    const r = executeTool("convert_units", { quantity: "5 mL", to_unit: "L" }, sopOnlyCtx());
+    expect(r.ok).toBe(true);
+    expect(r.calc?.values.to).toEqual({ value: 0.005, unit: "L" });
+    expect(r.calc?.summary).toBe("5 mL = 0.005 L");
+    expect(r.calc?.spoken).not.toMatch(/5 milliliters is 5 milliliters/);
+    expect(r.calc?.spoken).toMatch(/liter/);
+    const big = executeTool("convert_units", { quantity: "2500 µL", to_unit: "µL" }, sopOnlyCtx());
+    expect(big.calc?.summary).toMatch(/2,?500 µL = 2,?500 µL/);
+  });
+
+  it("molecular weights only come from an EXACT SOP reagent match", () => {
+    const ctx = sopOnlyCtx(trisSop());
+    // "Tris-HCl" is not Tris base (different MW): no silent substring match
+    const tris = executeTool("calc_molar_solution", { concentration: "1 M", volume: "500 mL", reagent: "Tris-HCl" }, ctx);
+    expect(tris.ok).toBe(false);
+    expect(tris.error).toMatch(/"Tris-HCl" is not a reagent in the SOP/);
+    expect(tris.error).toMatch(/molecular weight/i);
+    // ... and the operator's stated MW is used when given
+    const stated = executeTool("calc_molar_solution", { concentration: "1 M", volume: "500 mL", reagent: "Tris-HCl", molecular_weight: 157.6 }, ctx);
+    expect(stated.ok).toBe(true);
+    expect(Object.values(stated.calc!.values).find((q) => q.unit === "g")?.value).toBeCloseTo(78.8, 2);
+    // exact name/alias still resolves
+    const base = executeTool("calc_molar_solution", { concentration: "1 M", volume: "500 mL", reagent: "Tris base" }, ctx);
+    expect(Object.values(base.calc!.values).find((q) => q.unit === "g")?.value).toBeCloseTo(60.57, 2);
+    // "acetic acid" must not borrow HCl's MW through its alias "acid"
+    const acetic = executeTool("convert_units", { quantity: "1 M", to_unit: "mg/mL", reagent: "acetic acid" }, ctx);
+    expect(acetic.ok).toBe(false);
+    expect(acetic.error).toMatch(/"acetic acid" is not a reagent in the SOP.*molecular weight/);
+    const dil = executeTool("calc_dilution", { stock_concentration: "1 M", final_concentration: "5 mg/mL", final_volume: "10 mL", reagent: "acetic acid" }, ctx);
+    expect(dil.ok).toBe(false);
+    expect(dil.error).toMatch(/not a reagent in the SOP.*molecular weight/);
+    // a molar->molar dilution doesn't need an MW, so an unknown reagent name is harmless
+    expect(executeTool("calc_dilution", { stock_concentration: "1 M", final_concentration: "50 mM", final_volume: "10 mL", reagent: "acetic acid" }, ctx).ok).toBe(true);
+    // hazard lookups stay loose ("the HCl bottle" -> concentrated HCl)
+    expect(executeTool("hazard_info", { query: "the HCl bottle" }, ctx).output).toMatchObject({ found: true });
+  });
+
+  it("reports timer time left from core's timerRemaining", () => {
+    const t0 = Date.parse("2026-10-08T10:00:00.000Z");
+    const run = new ExperimentRun({ runId: "run-timers", sop: fixtureSop(), now: () => new Date(t0) });
+    run.start();
+    const ctx: ToolContext = { run, now: () => t0 + 60_000 };
+    expect(executeTool("start_timer", { label: "Spin", duration: "5 min" }, ctx).output).toMatchObject({ duration: "5 minutes", display: "5:00" });
+    const timers = (executeTool("get_run_summary", {}, ctx).output as { timers: unknown[] }).timers;
+    expect(timers).toEqual([expect.objectContaining({ label: "Spin", remainingSeconds: 240, remaining: "4 minutes", display: "4:00" })]);
   });
 
   it("drives the experiment run: steps, critical confirmation, readings, timers", () => {

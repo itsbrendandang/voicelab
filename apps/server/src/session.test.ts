@@ -1,31 +1,63 @@
 import { afterEach, describe, expect, it } from "vitest";
 import { PROTOCOL_VERSION, type SessionConfig } from "@voicelab/core";
 import { loadConfig } from "./config";
-import { Session, matchWakePhrase } from "./session";
+import { CLOSE_RESUMED_ELSEWHERE, Session, matchWakePhrase } from "./session";
 import { SopRegistry } from "./sops";
+import { RunRegistry } from "./runs";
 import type { LabAgent } from "./agent/types";
 import { executeTool } from "./agent/tools";
+import { TtsError } from "./providers/tts/elevenlabs";
+import type { SynthesisHooks, TtsProvider } from "./providers/tts/types";
 import { FakeStt, FakeTts, ScriptedAgent, TestTransport, fixtureSop, tick, untilAborted } from "./testing/helpers";
 
 const sessions: Session[] = [];
+const registries: RunRegistry[] = [];
 afterEach(() => {
   for (const s of sessions.splice(0)) s.close();
+  for (const r of registries.splice(0)) r.endAll();
 });
 
-function setup(opts: { agent?: LabAgent; stt?: FakeStt; tts?: FakeTts } = {}) {
+class ClosableTransport extends TestTransport {
+  closed: { code: number; reason: string } | undefined;
+  close(code: number, reason: string): void {
+    this.closed = { code, reason };
+  }
+}
+
+function setup(opts: { agent?: LabAgent; stt?: FakeStt; tts?: TtsProvider; runs?: RunRegistry } = {}) {
   const agent = opts.agent ?? new ScriptedAgent();
-  const transport = new TestTransport();
+  const transport = new ClosableTransport();
+  const factory = { calls: 0 };
   const session = new Session(
-    { config: loadConfig({}), sops: new SopRegistry([fixtureSop()]), agentFactory: () => agent, stt: opts.stt, tts: opts.tts },
+    {
+      config: loadConfig({}),
+      sops: new SopRegistry([fixtureSop()]),
+      agentFactory: () => (factory.calls++, agent),
+      stt: opts.stt,
+      tts: opts.tts,
+      runs: opts.runs,
+    },
     transport,
   );
   sessions.push(session);
-  const start = (config: Partial<SessionConfig> = {}, sopId: string | undefined = "bradford-assay") =>
+  const start = (config: Partial<SessionConfig> = {}, sopId: string | undefined = "bradford-assay", resumeRunId?: string) =>
     session.handleText(
-      JSON.stringify({ type: "session.start", protocol: PROTOCOL_VERSION, config: { stt: "browser", tts: "browser", listen: "handsfree", ...config }, sopId }),
+      JSON.stringify({
+        type: "session.start",
+        protocol: PROTOCOL_VERSION,
+        config: { stt: "browser", tts: "browser", listen: "handsfree", ...config },
+        sopId,
+        ...(resumeRunId ? { resumeRunId } : {}),
+      }),
     );
   const send = (msg: unknown) => session.handleText(JSON.stringify(msg));
-  return { session, transport, agent, start, send };
+  return { session, transport, agent, start, send, factory };
+}
+
+function registry(graceMs = 60_000): RunRegistry {
+  const r = new RunRegistry({ graceMs });
+  registries.push(r);
+  return r;
 }
 
 describe("matchWakePhrase", () => {
@@ -42,6 +74,8 @@ describe("Session", () => {
     await start({ stt: "server", tts: "server" });
     const ready = await transport.waitFor("session.ready");
     expect(ready.protocol).toBe(PROTOCOL_VERSION);
+    expect(ready.runId).toMatch(/^run-/);
+    expect(ready.resumed).toBe(false);
     // no server STT/TTS configured -> downgraded to browser
     expect(ready.config).toMatchObject({ stt: "browser", tts: "browser", listen: "handsfree" });
     expect(ready.providers).toEqual({ stt: "browser", llm: "scripted", tts: "browser" });
@@ -338,5 +372,271 @@ describe("Session", () => {
     await session.idle();
     expect(transport.of("error")[0]!.message).toMatch(/offline assistant/);
     expect(transport.of("assistant.done")[0]!.text).toMatch(/^Step 1:/);
+  });
+});
+
+describe("Session: runs survive reconnects", () => {
+  it("re-attaches with resumeRunId: same run, step, agent and full state; timers keep running while detached", async () => {
+    const runs = registry();
+    const a = setup({ runs });
+    await a.start();
+    const runId = (await a.transport.waitFor("session.ready")).runId;
+    await a.send({ type: "step.goto", stepId: "s3" });
+    await a.send({ type: "timer.start", seconds: 1, label: "Spin" });
+    await a.send({ type: "timer.start", seconds: 600, label: "Long incubation" });
+    a.session.close(); // socket dropped
+    const live = runs.get(runId)!;
+    expect(live.run.state.endedAt).toBeUndefined(); // detached, not ended
+    expect(live.run.state.timers.map((t) => t.status)).toEqual(["running", "running"]);
+
+    await tick(1200); // the 1 s timer fires with nobody connected...
+    expect(live.run.state.timers[0]!.status).toBe("fired"); // ...and is recorded on the run
+    expect(live.run.events.some((e) => e.type === "timer.fired")).toBe(true);
+
+    const b = setup({ runs, agent: a.agent });
+    await b.start({}, "bradford-assay", runId);
+    const ready = await b.transport.waitFor("session.ready");
+    expect(ready).toMatchObject({ runId, resumed: true });
+    const state = b.transport.of("state")[0]!.state;
+    expect(state.runId).toBe(runId);
+    expect(state.currentStepId).toBe("s3");
+    expect(state.timers.map((t) => [t.label, t.status])).toEqual([
+      ["Spin", "fired"],
+      ["Long incubation", "running"],
+    ]);
+    // the missed timer is announced on re-attach
+    expect(b.transport.of("alert").some((x) => x.alert.source === "timer" && /Spin finished while you were disconnected/.test(x.alert.message))).toBe(true);
+    expect(b.transport.of("speak").at(-1)!.text).toMatch(/While you were disconnected, the Spin timer finished/);
+    expect(b.factory.calls).toBe(0); // same agent (conversation) as before, not a new one
+
+    // the resumed connection drives the same run
+    await b.send({ type: "step.complete" });
+    expect(live.run.state.currentStepId).toBe("s4");
+    expect(b.transport.of("event").some((e) => e.event.type === "step.completed")).toBe(true);
+  });
+
+  it("starts a fresh run for an unknown or expired resumeRunId", async () => {
+    const runs = registry(50);
+    const a = setup({ runs });
+    await a.start();
+    const runId = (await a.transport.waitFor("session.ready")).runId;
+    await a.send({ type: "timer.start", seconds: 600, label: "Incubate" });
+    const run = a.session.experimentRun!;
+    a.session.close();
+    await tick(120); // grace period lapses: run ends, timers cancelled
+    expect(runs.get(runId)).toBeUndefined();
+    expect(run.state.endedAt).toBeDefined();
+    expect(run.state.timers[0]!.status).toBe("cancelled");
+
+    const b = setup({ runs });
+    await b.start({}, "bradford-assay", runId);
+    const ready = await b.transport.waitFor("session.ready");
+    expect(ready.resumed).toBe(false);
+    expect(ready.runId).not.toBe(runId);
+    const c = setup({ runs });
+    await c.start({}, "bradford-assay", "run-nope");
+    expect((await c.transport.waitFor("session.ready")).resumed).toBe(false);
+  });
+
+  it("without a registry (grace 0) the run ends when the connection closes", async () => {
+    const { session, start } = setup();
+    await start();
+    const run = session.experimentRun!;
+    session.close();
+    expect(run.state.endedAt).toBeDefined();
+  });
+
+  it("a second connection resuming a run evicts the first", async () => {
+    const runs = registry();
+    const a = setup({ runs });
+    await a.start();
+    const runId = (await a.transport.waitFor("session.ready")).runId;
+    const b = setup({ runs });
+    await b.start({}, undefined, runId);
+    expect((await b.transport.waitFor("session.ready")).resumed).toBe(true);
+    expect(a.transport.of("error").at(-1)).toMatchObject({ fatal: true, message: expect.stringMatching(/resumed from another connection/) });
+    expect(a.transport.closed?.code).toBe(CLOSE_RESUMED_ELSEWHERE);
+    expect(a.session.isClosed).toBe(true);
+    // the evicted session's close must not detach the run from its new owner
+    await b.send({ type: "step.complete" });
+    expect(b.transport.of("event").some((e) => e.event.type === "step.completed")).toBe(true);
+    expect(runs.get(runId)!.run.state.endedAt).toBeUndefined();
+  });
+
+  it("re-sends unacknowledged danger alerts on resume", async () => {
+    const runs = registry();
+    const a = setup({ runs });
+    await a.start();
+    const runId = (await a.transport.waitFor("session.ready")).runId;
+    await a.send({ type: "user.text", text: "I'm going to pour the bleach into the acid waste" });
+    await a.session.idle();
+    const danger = a.transport.of("alert").find((x) => x.alert.level === "danger")!.alert;
+    a.session.close();
+    const b = setup({ runs });
+    await b.start({}, undefined, runId);
+    expect(b.transport.of("alert").map((x) => x.alert.id)).toContain(danger.id);
+  });
+});
+
+describe("Session: number provenance", () => {
+  it("a flagged number stays unbacked: the alert and the assistant's own words never back it", async () => {
+    const agent = new ScriptedAgent(async (o) => {
+      o.onTextDelta("Add 42 mL of buffer.");
+      return "";
+    });
+    const { session, transport, start, send } = setup({ agent });
+    await start();
+    await send({ type: "user.text", text: "how much buffer?" });
+    await session.idle();
+    await send({ type: "user.text", text: "how much buffer again?" });
+    await session.idle();
+    const flagged = transport.of("alert").filter((a) => a.alert.title === "Check this number");
+    expect(flagged).toHaveLength(2); // flagged in BOTH turns
+    expect(flagged.every((a) => /said 42 /.test(a.alert.message))).toBe(true);
+
+    // once the operator says it, it is backed
+    await send({ type: "user.text", text: "I'll add 42 mL then" });
+    await session.idle();
+    expect(transport.of("alert").filter((a) => a.alert.title === "Check this number")).toHaveLength(2);
+  });
+
+  it("agent-written notes and deviations don't back numbers either", async () => {
+    let n = 0;
+    const agent = new ScriptedAgent(async (o) => {
+      if (n++ === 0) {
+        o.onToolCall?.({ id: "t1", name: "record_observation", input: { text: "used 17 mL" } });
+        const exec = executeTool("record_observation", { text: "used 17 mL" }, { run: session.experimentRun! });
+        o.onToolResult?.({ id: "t1", name: "record_observation", input: { text: "used 17 mL" }, output: exec.output, isError: false, ms: 1 });
+        executeTool("record_deviation", { description: "added 23 µL extra" }, { run: session.experimentRun! });
+        o.onTextDelta("Noted.");
+        return "";
+      }
+      o.onTextDelta("You used 17 mL and 23 µL.");
+      return "";
+    });
+    const { session, transport, start, send } = setup({ agent });
+    await start();
+    await send({ type: "user.text", text: "note it" });
+    await session.idle();
+    await send({ type: "user.text", text: "what did I use?" });
+    await session.idle();
+    const flagged = transport.of("alert").filter((a) => a.alert.title === "Check this number");
+    expect(flagged).toHaveLength(1);
+    expect(flagged[0]!.alert.message).toMatch(/said 17, 23 /);
+  });
+
+  it("numbers the agent was shown in <bench_state> (timer time left) are backed", async () => {
+    const agent = new ScriptedAgent(async (o) => {
+      o.onBacking?.([{ seconds: 272, spoken: "4 minutes 32 seconds", display: "4:32" }]);
+      o.onTextDelta("About 4 minutes 32 seconds left on the timer.");
+      return "";
+    });
+    const { session, transport, start, send } = setup({ agent });
+    await start();
+    await send({ type: "user.text", text: "how long is left?" });
+    await session.idle();
+    expect(transport.of("alert").filter((a) => a.alert.title === "Check this number")).toHaveLength(0);
+  });
+});
+
+describe("Session: speech priority", () => {
+  async function dangerThenInterrupt(scope: "turn" | "all" | undefined) {
+    const tts = new FakeTts(25);
+    const agent = new ScriptedAgent(async (o) => {
+      o.onTextDelta("Keep them separate and ventilate the area. ");
+      await untilAborted(o.signal);
+      return "";
+    });
+    const { session, transport, start, send } = setup({ agent, tts });
+    await start({ tts: "server" });
+    await send({ type: "user.text", text: "I'm going to pour the bleach into the acid waste" });
+    await send(scope ? { type: "interrupt", scope } : { type: "interrupt" });
+    await session.idle();
+    return { transport, tts };
+  }
+
+  it("tts.start carries priority; a turn-scoped barge-in lets urgent safety speech finish", async () => {
+    const { transport, tts } = await dangerThenInterrupt(undefined);
+    const urgent = transport.of("tts.start").filter((t) => t.priority === "urgent");
+    expect(urgent).toHaveLength(1);
+    expect(urgent[0]!.turnId).toMatch(/^alert-/);
+    expect(tts.sentences.join(" ")).toMatch(/chlorine/i);
+    // the urgent stream really delivered audio and ended normally
+    const startIdx = transport.order.indexOf("tts.start");
+    expect(transport.order.slice(startIdx)).toContain("binary");
+    expect(transport.of("tts.end").some((e) => e.turnId === urgent[0]!.turnId)).toBe(true);
+    // the assistant's own turn was cut off
+    expect(transport.of("assistant.done")[0]!.interrupted).toBe(true);
+    expect(transport.of("tts.start").filter((t) => t.priority === "normal")).toHaveLength(0);
+  });
+
+  it("an explicit Stop (scope all) silences urgent speech too", async () => {
+    const { transport } = await dangerThenInterrupt("all");
+    expect(transport.binary).toHaveLength(0);
+    expect(transport.of("tts.start")).toHaveLength(0);
+  });
+});
+
+/** Reads three sentences ahead, finishes the first, fails halfway through the second. */
+class ReadAheadFailingTts implements TtsProvider {
+  readonly name = "flaky-tts";
+  readonly sampleRate = 16000;
+  readonly taken: string[] = [];
+  async *synthesize(text: AsyncIterable<string>, _signal: AbortSignal, hooks?: SynthesisHooks): AsyncIterable<Buffer> {
+    const it = text[Symbol.asyncIterator]();
+    for (let i = 0; i < 3; i++) {
+      const r = await it.next();
+      if (r.done) break;
+      this.taken.push(r.value);
+    }
+    yield Buffer.alloc(320, 1);
+    hooks?.onChunkDone?.(this.taken[0]!);
+    yield Buffer.alloc(320, 2); // part of sentence two
+    throw new TtsError("ElevenLabs TTS HTTP 500: upstream error", 500);
+  }
+}
+
+describe("Session: TTS failure mid-stream", () => {
+  it("re-speaks every taken-but-unplayed sentence in order, then the rest of the reply", async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    const agent = new ScriptedAgent(async (o) => {
+      o.onTextDelta("First sentence here. Second sentence here. Third sentence here. ");
+      await gate;
+      o.onTextDelta("Fourth sentence here.");
+      return "";
+    });
+    const tts = new ReadAheadFailingTts();
+    const { session, transport, start, send } = setup({ agent, tts });
+    await start({ tts: "server" });
+    await send({ type: "user.text", text: "go" });
+    await transport.waitFor("error", (e) => /Text-to-speech failed/.test(e.message));
+    release();
+    await session.idle();
+    expect(tts.taken).toEqual(["First sentence here.", "Second sentence here.", "Third sentence here."]);
+    expect(transport.of("speak").map((m) => m.text)).toEqual(["Second sentence here.", "Third sentence here.", "Fourth sentence here."]);
+    // audio stream closed before the browser voice takes over
+    expect(transport.order.indexOf("tts.end")).toBeLessThan(transport.order.indexOf("speak"));
+    expect(transport.of("tts.end")).toHaveLength(1);
+  });
+});
+
+describe("Session: server STT handshake failure", () => {
+  it("falls back to browser STT and tells the client", async () => {
+    const stt = new FakeStt();
+    const { transport, start } = setup({ stt });
+    await start({ stt: "server" });
+    expect(transport.of("session.ready")[0]!.config.stt).toBe("server");
+    const stream = stt.current!;
+    stream.events.onError(new Error("Deepgram rejected the connection (HTTP 401: API key rejected)"));
+    stream.events.onClose?.();
+    expect(transport.of("error").map((e) => e.message)).toEqual([
+      "Deepgram rejected the connection (HTTP 401: API key rejected)",
+      expect.stringMatching(/switching to browser speech recognition/),
+    ]);
+    const ready = transport.of("session.ready").at(-1)!;
+    expect(ready.config.stt).toBe("browser");
+    expect(ready.providers.stt).toBe("browser");
+    expect(transport.of("status").at(-1)).toMatchObject({ listening: false });
   });
 });

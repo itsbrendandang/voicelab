@@ -4,11 +4,11 @@
  * (via `executeTool`), so calculations, run records, timers and safety
  * lookups behave identically with zero API keys.
  */
-import { parseQuantity, type Quantity, type Sop, type Step } from "@voicelab/core";
-import { executeTool, findReagent, stepNumber, type ToolContext, type ToolExecution } from "./tools";
+import { parseQuantity, speakDuration, type Quantity, type Sop, type Step } from "@voicelab/core";
+import { executeTool, stepNumber, type ToolContext, type ToolExecution } from "./tools";
 import type { LabAgent, RunTurnOptions } from "./types";
 import { splitSentences } from "../providers/tts/chunker";
-import { parseDuration, replaceNumberWords, speakDuration } from "../util/spoken";
+import { parseDuration, replaceNumberWords } from "../util/spoken";
 
 type QKind = "volume" | "molar" | "massConc" | "mass" | "percent" | "fold" | "other";
 
@@ -92,6 +92,45 @@ function stepSpeech(sop: Sop, step: Step): string {
   return parts.map((p) => (/[.!?]$/.test(p) ? p : `${p}.`)).join(" ");
 }
 
+// ---- negation / hedging / questions (checked before any confirm/complete intent)
+
+const NEGATION =
+  /\b(?:not|no|nope|never|cannot|can ?not|almost|nearly|hardly|barely|still|wait|hold on)\b|\b\w+n['’]t\b|\b(?:cant|dont|doesnt|didnt|havent|hasnt|hadnt|isnt|arent|wasnt|werent|wont|wouldnt|couldnt|shouldnt|aint)\b/i;
+/** Polite requests phrased as questions ("can you move on?") are still requests. */
+const REQUEST = /^(?:(?:ok(?:ay)?|so|alright|please)[,\s]+)?(?:can|could|would|will) (?:you|we)\b|^(?:let'?s|please)\b/i;
+const YES_NO_Q = /^(?:(?:ok(?:ay)?|so|and|alright)[,\s]+)?(?:am|is|are|was|were|do|does|did|have|has|had|can|could|may|might|should|shall|will|would)\b/i;
+const WH_Q = /^(?:(?:ok(?:ay)?|so|and|alright)[,\s]+)?(?:what|when|where|why|how|which|who)\b/i;
+
+/**
+ * How an utterance that LOOKS like "done"/"confirmed" is hedged:
+ * "negated" ("I'm not done yet", "I can't confirm this step"), "status" (a yes/no
+ * question: "am I done?"), "question" (a wh-question: "how do I know when I'm done?"),
+ * or undefined when it is a plain statement or request.
+ */
+export function hedge(text: string): "negated" | "status" | "question" | undefined {
+  const t = text.trim().toLowerCase();
+  if (NEGATION.test(t)) return "negated";
+  if (REQUEST.test(t)) return undefined;
+  if (WH_Q.test(t)) return "question";
+  if (YES_NO_Q.test(t) || /\?\s*$/.test(t)) return "status";
+  return undefined;
+}
+
+/**
+ * Molecular weight stated by the operator: "MW 157.6", "molecular weight is 157.6 g/mol".
+ * With `bare`, a lone number answer ("157.6", "it's 157.6 grams per mole") counts too.
+ */
+export function parseMolecularWeight(text: string, bare: boolean): number | undefined {
+  const named = /\b(?:mw|molecular weight|formula weight|fw|molar mass)\b(?:\s+(?:is|of|was|=|:))?\s*[:=]?\s*(\d+(?:\.\d+)?)/i.exec(text);
+  const m =
+    named ??
+    (bare
+      ? /^(?:(?:it'?s|its|it is|that'?s|the bottle says|about)\s+)*(\d+(?:\.\d+)?)\s*(?:g\s*\/\s*mol(?:e)?|g per mol(?:e)?|grams? per mol(?:e)?|daltons?|da)?[.!]*$/i.exec(text.trim())
+      : null);
+  const v = m ? Number(m[1]) : NaN;
+  return Number.isFinite(v) && v > 0 ? v : undefined;
+}
+
 function cleanSubject(s: string): string {
   return s
     .replace(/[?.!]+$/g, "")
@@ -104,6 +143,8 @@ export class OfflineAgent implements LabAgent {
   readonly name = "offline";
   private lastReply = "";
   private awaitingConfirmation = false;
+  /** A molar-solution request waiting for the operator to say the molecular weight. */
+  private pendingMolar: { concentration: string; volume: string; reagent: string } | undefined;
   private seq = 0;
 
   constructor(private readonly ctx: ToolContext) {}
@@ -111,6 +152,7 @@ export class OfflineAgent implements LabAgent {
   reset(): void {
     this.lastReply = "";
     this.awaitingConfirmation = false;
+    this.pendingMolar = undefined;
   }
 
   async runTurn(opts: RunTurnOptions): Promise<string> {
@@ -144,21 +186,44 @@ export class OfflineAgent implements LabAgent {
     const sop = this.ctx.run.sop;
     const wasAwaiting = this.awaitingConfirmation;
     this.awaitingConfirmation = false;
+    const pendingMolar = this.pendingMolar;
+    this.pendingMolar = undefined;
+    const hedged = hedge(text);
 
     // The session already raised and spoke the deterministic safety alert; add nothing that could distract from it.
     if (opts.context?.safetyFindings?.some((f) => f.level === "danger")) return "";
 
     // ---- stop words / acknowledgements (barge-in already silenced playback)
     if (/^(stop|quiet|silence|shut up|never ?mind|cancel|be quiet|hold on|wait|pause)[.!]*$/i.test(lower)) return "";
-    if (/^(ok(ay)?|thanks?( you)?|got it|great|cool|perfect)[.!]*$/i.test(lower)) return wasAwaiting ? "Say confirmed when the critical step is done." : "Sure.";
-
-    // ---- confirmation of a critical step
-    if (wasAwaiting && /^(yes|yep|yeah|confirm(ed)?|i confirm|affirmative|correct|checked|all (checks )?(done|good|confirmed))\b/i.test(lower)) {
-      return this.complete(opts, true);
+    if (/^(ok(ay)?|thanks?( you)?|got it|great|cool|perfect)[.!]*$/i.test(lower)) {
+      this.awaitingConfirmation = wasAwaiting;
+      return wasAwaiting ? "Say confirmed when the critical step is done." : "Sure.";
     }
-    if (/\bconfirm(ed)?\b.*\bstep\b|\bstep\b.*\bconfirm(ed)?\b/.test(lower)) return this.complete(opts, true);
-    if (/^(confirm(ed)?|i confirm|all checks? (done|confirmed))[.!]*$/i.test(lower)) {
+
+    // ---- confirmation of a critical step: only a plain, un-negated statement confirms.
+    const confirmIntent =
+      (wasAwaiting && /^(yes|yep|yeah|confirm(ed)?|i confirm|affirmative|correct|checked|all (checks )?(done|good|confirmed))\b/i.test(lower)) ||
+      /\bconfirm(ed)?\b.*\bstep\b|\bstep\b.*\bconfirm(ed)?\b/.test(lower) ||
+      /^(confirm(ed)?|i confirm|all checks? (done|confirmed))[.!]*$/i.test(lower);
+    if (confirmIntent) {
+      if (hedged || REQUEST.test(lower)) {
+        // "I can't confirm this step yet", "yes, but the pipette isn't calibrated", "can you confirm it?"
+        if (this.ctx.run.currentStep()?.critical) this.awaitingConfirmation = true;
+        return this.holdReply(hedged ?? "negated", true);
+      }
+      if (wasAwaiting || !/^(confirm(ed)?|i confirm|all checks? (done|confirmed))[.!]*$/i.test(lower)) return this.complete(opts, true);
       return this.ctx.run.currentStep()?.critical ? this.complete(opts, true) : "There's nothing waiting for confirmation right now.";
+    }
+    if (wasAwaiting && hedged === "negated") {
+      // "no", "not yet", "I haven't labeled them": keep waiting for the confirmation.
+      this.awaitingConfirmation = true;
+      return this.holdReply("negated", true);
+    }
+
+    // ---- molecular weight for a molar solution we asked about last turn
+    if (pendingMolar) {
+      const mw = parseMolecularWeight(text, true);
+      if (mw !== undefined) return this.molar(opts, { ...pendingMolar, molecular_weight: mw });
     }
 
     // ---- safety: incompatibility
@@ -248,13 +313,15 @@ export class OfflineAgent implements LabAgent {
       if (molar && concs.length === 1) {
         const after = text.slice(molar.end);
         const reagentText = cleanSubject(after.replace(/^\s*(?:of\s+)?/i, "").replace(/[?.!].*$/, ""));
-        const reagent = reagentText || this.guessReagent(sop);
-        if (!reagent) return "Which reagent? I need it to look up the molecular weight.";
-        const exec = this.tool(opts, "calc_molar_solution", { concentration: molar.raw, volume: volumes[0]!.raw, reagent });
-        if (!exec.ok && /molecular weight/i.test(exec.error ?? "")) {
-          return `${exec.error?.split(". Ask")[0] ?? "I need a molecular weight"}. Tell me the molecular weight from the bottle and I'll do the math.`;
-        }
-        return this.calcReply(exec);
+        const mw = parseMolecularWeight(text, false);
+        const reagent = cleanSubject(reagentText.replace(/[,;]?\s*(?:with\s+)?(?:an?\s+)?(?:mw|molecular weight|formula weight|fw|molar mass)\b.*$/i, "")) || this.guessReagent(sop);
+        if (!reagent && mw === undefined) return "Which reagent? I need it to look up the molecular weight.";
+        return this.molar(opts, {
+          concentration: molar.raw,
+          volume: volumes[0]!.raw,
+          ...(reagent ? { reagent } : {}),
+          ...(mw !== undefined ? { molecular_weight: mw } : {}),
+        });
       }
       const pct = qs.find((x) => x.kind === "percent");
       if (pct) {
@@ -309,7 +376,10 @@ export class OfflineAgent implements LabAgent {
     // ---- navigation
     const gotoNum = /\b(?:go|jump|skip|move|switch|take me|back)(?: back)? to step (\d+)\b/i.exec(text) ?? /^step (\d+)[?.!]*$/i.exec(text);
     const gotoDesc = /\b(?:go|jump|skip|move|take me)(?: back)? to (?:the )?(.+? step)\b/i.exec(text);
-    if (!gotoNum && gotoDesc && /^next\b/i.test(gotoDesc[1]!)) return this.complete(opts, false);
+    if (!gotoNum && gotoDesc && /^next\b/i.test(gotoDesc[1]!)) {
+      if (hedged === "negated" || hedged === "status") return this.holdReply(hedged, false);
+      if (!hedged) return this.complete(opts, false);
+    }
     if (gotoNum || gotoDesc) {
       const exec = this.tool(opts, "goto_step", { step: gotoNum ? gotoNum[1]! : gotoDesc![1]! });
       return this.stepReply(exec);
@@ -328,7 +398,11 @@ export class OfflineAgent implements LabAgent {
       return this.stepReply(this.tool(opts, "get_current_step", {}));
     }
     if (/\b(next|done|finished|complete[d]?|move on|ready for the next|that's it|all set)\b/i.test(lower)) {
-      return this.complete(opts, false);
+      // "I'm not done yet" / "am I done?" must never complete the step.
+      if (hedged === "negated" || hedged === "status") return this.holdReply(hedged, false);
+      if (!hedged) return this.complete(opts, false);
+      if (/\bnext\b/.test(lower)) return this.previewNext();
+      // other wh-questions ("how do I know when I'm done?") fall through to the SOP search
     }
     if (/\b(summary|status|progress|how am i doing|how far)\b/i.test(lower)) {
       const exec = this.tool(opts, "get_run_summary", {});
@@ -373,19 +447,30 @@ export class OfflineAgent implements LabAgent {
   }
 
   private parseReading(text: string): Record<string, unknown> | undefined {
-    const LABEL = String.raw`(absorbance|a ?\d{3}|od ?\d{0,3}|optical density|ph|temperature|temp|concentration|reading|volume|weight|mass|cell count|count|conductivity|viability)`;
+    const LABEL = String.raw`(?<label>absorbance|a ?\d{3}|od ?\d{0,3}|optical density|ph|temperature|temp|concentration|reading|volume|weight|mass|cell count|count|conductivity|viability)`;
+    // Words that introduce the value. A qualifier never ends in one of these.
+    const VERB = String.raw`(?:is|was|reads|read|equals|came out(?: at)?|measured(?: at)?|=|:)`;
     // Optional qualifier between label and value: "absorbance of the blank is 1.9", "pH for sample 2 was 7.4".
-    const QUAL = String.raw`(?:\s+(?:of|for|in|on)\s+(?:the\s+)?([a-z][\w-]*(?:\s+[\w-]+)?))?`;
-    const re = new RegExp(String.raw`\b${LABEL}\b${QUAL}(?:\s+(?:is|was|reads|read|of|at|equals|came out(?: at)?|measured))*\s*[:=]?\s*(?:about\s+|around\s+)?(-?\d+(?:\.\d+)?)\s*([µuμ]?[A-Za-z/%°]+)?`, "i");
-    const m = re.exec(text);
+    // Its second word must not be the verb ("blank is"), or the verb would end up in the label.
+    const QUAL = String.raw`(?:\s+(?:of|for|in|on)\s+(?:the\s+)?(?<qual>(?!${VERB}(?![\w-]))[a-z][\w-]*(?:\s+(?!(?:${VERB}|at)(?![\w-]))[\w-]+)?))?`;
+    // "at 595 (nm)" right after the label is a wavelength when a value verb follows
+    // ("the absorbance at 595 is 0.45"); the value is the number after the verb.
+    const WAVE = (name: string) => String.raw`(?:\s+(?:at|@)\s+(?<${name}>\d+(?:\.\d+)?)\s*(?:nm|nanometers?)?(?=\s*[:=]|\s+${VERB}(?![\w-])))?`;
+    const re = new RegExp(
+      String.raw`\b${LABEL}\b${WAVE("wave")}${QUAL}${WAVE("wave2")}(?:\s+(?:is|was|reads|read|of|at(?!\s+\d+(?:\.\d+)?\s*(?:nm|nanometers?)?(?:\s*[:=]|\s+${VERB}(?![\w-])))|equals|came out(?: at)?|measured(?: at)?|now))*\s*[:=]?\s*(?:about\s+|around\s+|approximately\s+)?(?<value>-?\d+(?:\.\d+)?)\s*(?<unit>[µuμ]?[A-Za-z/%°]+)?`,
+      "i",
+    );
+    const m = re.exec(text)?.groups;
     const generic = m ? undefined : /\b(?:it (?:reads|is|was)|it's|i got|reading of|measured)\s+(-?\d+(?:\.\d+)?)\s*([µuμ]?[A-Za-z/%°]+)?/i.exec(text);
     if (!m && !generic) return undefined;
-    const label = m ? m[1]!.toLowerCase().replace(/\s+/g, "") : undefined;
-    const qualifier = m?.[2]?.trim().toLowerCase();
-    const value = Number(m ? m[3] : generic![1]);
+    const label = m ? m.label!.toLowerCase().replace(/\s+/g, "") : undefined;
+    const qualifier = m?.qual?.trim().toLowerCase();
+    const value = Number(m ? m.value : generic![1]);
     if (!Number.isFinite(value)) return undefined;
-    let unit = (m ? m[4] : generic![2])?.trim();
-    if (unit && /^(and|at|in|on|for|the|so|but|which)$/i.test(unit)) unit = undefined;
+    let unit = (m ? m.unit : generic![2])?.trim();
+    if (unit && /^(and|at|in|on|for|the|so|but|which|is|was)$/i.test(unit)) unit = undefined;
+    // "absorbance at 595 nm" with no value is a wavelength, not a reading.
+    if (unit && /^(nm|nanometers?)$/i.test(unit)) return undefined;
 
     const step = this.ctx.run.currentStep();
     const specs = step?.measurements ?? [];
@@ -414,6 +499,43 @@ export class OfflineAgent implements LabAgent {
     // Put the qualifier first ("blank absorbance") so core's label matcher can tell specs apart.
     const prettyLabel = baseLabel && qualifier ? `${qualifier} ${baseLabel}` : baseLabel;
     return { value, unit, ...(spec ? { spec_id: spec.id, label: spec.label } : prettyLabel ? { label: prettyLabel } : {}) };
+  }
+
+  /** Reply to a hedged "done"/"confirmed" without changing the run. */
+  private holdReply(kind: "negated" | "status" | "question", confirming: boolean): string {
+    const sop = this.ctx.run.sop;
+    const step = this.ctx.run.currentStep();
+    if (!sop || !step) return "There's no active step right now.";
+    const where = `step ${stepNumber(sop, step.id)}, ${step.title}`;
+    if (confirming && step.critical) {
+      const checks = step.checks.length ? ` Check: ${step.checks.join("; ")}.` : "";
+      return kind === "negated"
+        ? `Okay, I'll wait. ${where} stays open.${checks} Say confirmed when every check is done.`
+        : `I can't confirm it for you.${checks} Say confirmed yourself when every check is done.`;
+    }
+    if (kind === "negated") return `Okay, take your time. You're still on ${where}. Say done when it's finished.`;
+    return `You're on ${where}. It isn't marked done yet; say done when it's finished.`;
+  }
+
+  /** "What's next?" — say where we are and what follows, without completing anything. */
+  private previewNext(): string {
+    const sop = this.ctx.run.sop;
+    const step = this.ctx.run.currentStep();
+    if (!sop || !step) return "There's no active step right now.";
+    const n = stepNumber(sop, step.id);
+    const next = sop.steps[n];
+    const after = next ? ` Next is step ${n + 1}, ${next.title}.` : " That's the last step.";
+    return `You're on step ${n}, ${step.title}.${after} Say done when this one is finished.`;
+  }
+
+  private molar(opts: RunTurnOptions, input: { concentration: string; volume: string; reagent?: string; molecular_weight?: number }): string {
+    const exec = this.tool(opts, "calc_molar_solution", input);
+    if (!exec.ok && input.molecular_weight === undefined && /molecular weight/i.test(exec.error ?? "")) {
+      this.pendingMolar = { concentration: input.concentration, volume: input.volume, reagent: input.reagent ?? "" };
+      const why = (exec.error ?? "").split(/\.\s/)[0] || "I need a molecular weight";
+      return `${why}. Tell me the molecular weight from the bottle, in grams per mole, and I'll do the math.`;
+    }
+    return this.calcReply(exec);
   }
 
   private complete(opts: RunTurnOptions, confirmed: boolean): string {
@@ -456,5 +578,3 @@ export class OfflineAgent implements LabAgent {
     return `${calc.spoken}${warn}`;
   }
 }
-
-export { findReagent };

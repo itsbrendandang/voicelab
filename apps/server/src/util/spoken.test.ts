@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { parseDuration, replaceNumberWords, speakDuration } from "./spoken";
+import { parseDuration, replaceNumberWords } from "./spoken";
 import { buildKeyterms, GENERIC_LAB_TERMS } from "../providers/stt/keyterms";
 import { fixtureSop } from "../testing/helpers";
 import { AsyncQueue, Semaphore } from "./async-queue";
@@ -20,8 +20,6 @@ describe("spoken helpers", () => {
     expect(parseDuration("1:30")).toBe(90);
     expect(parseDuration("ten minutes")).toBe(600);
     expect(parseDuration("soon")).toBeUndefined();
-    expect(speakDuration(272)).toBe("4 minutes 32 seconds");
-    expect(speakDuration(3600)).toBe("1 hour");
   });
 });
 

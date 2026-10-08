@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { ConfigError, loadConfig, providerInfo } from "./config";
+import { ConfigError, DEFAULT_ALLOWED_ORIGINS, loadConfig, providerInfo } from "./config";
 
 describe("loadConfig", () => {
   it("falls back to browser STT/TTS and the offline agent with zero keys", () => {
@@ -52,5 +52,29 @@ describe("loadConfig", () => {
     expect(() => loadConfig({ VOICELAB_STT: "whisper" })).toThrow(ConfigError);
     expect(() => loadConfig({ VOICELAB_LLM_EFFORT: "turbo" })).toThrow(ConfigError);
     expect(() => loadConfig({ PORT: "abc" })).toThrow(ConfigError);
+  });
+
+  it("is closed by default: loopback bind, no token, dev origins only; 10 min resume window", () => {
+    const c = loadConfig({});
+    expect(c.host).toBe("127.0.0.1");
+    expect(c.security.accessToken).toBeUndefined();
+    expect(c.security.allowedOrigins).toEqual(DEFAULT_ALLOWED_ORIGINS);
+    expect(c.security.allowedOrigins).toContain("http://localhost:5173");
+    expect(c.resumeGraceMs).toBe(600_000);
+  });
+
+  it("reads HOST, allowed origins, access token and the resume window", () => {
+    const c = loadConfig({
+      HOST: "0.0.0.0",
+      VOICELAB_ALLOWED_ORIGINS: "https://Lab.Example.com/, http://bench-3:8787 ,,",
+      VOICELAB_ACCESS_TOKEN: "s3cret",
+      VOICELAB_RESUME_GRACE_MS: "0",
+    });
+    expect(c.host).toBe("0.0.0.0");
+    expect(c.security.allowedOrigins).toEqual(["https://lab.example.com", "http://bench-3:8787"]);
+    expect(c.security.accessToken).toBe("s3cret");
+    expect(c.resumeGraceMs).toBe(0);
+    expect(() => loadConfig({ VOICELAB_ALLOWED_ORIGINS: "not an origin" })).toThrow(ConfigError);
+    expect(() => loadConfig({ VOICELAB_RESUME_GRACE_MS: "-5" })).toThrow(ConfigError);
   });
 });

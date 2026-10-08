@@ -32,8 +32,8 @@ afterAll(async () => {
 });
 
 /** WebSocket client that buffers every JSON message. */
-async function connect() {
-  const ws = new WebSocket(`ws://${base}/ws`);
+async function connect(opts: { host?: string; query?: string; origin?: string } = {}) {
+  const ws = new WebSocket(`ws://${opts.host ?? base}/ws${opts.query ?? ""}`, opts.origin ? { origin: opts.origin } : {});
   const messages: ServerMessage[] = [];
   const waiters: (() => void)[] = [];
   ws.on("message", (data, isBinary) => {
@@ -78,6 +78,70 @@ describe("HTTP API", () => {
   });
 });
 
+/** HTTP status a WebSocket upgrade was refused with (0 if it opened). */
+function upgradeStatus(url: string, origin?: string): Promise<number> {
+  return new Promise((resolve, reject) => {
+    const ws = new WebSocket(url, origin ? { origin } : {});
+    ws.once("open", () => {
+      ws.close();
+      resolve(0);
+    });
+    ws.once("unexpected-response", (req, res) => {
+      resolve(res.statusCode ?? -1);
+      req.destroy();
+    });
+    ws.once("error", reject);
+  });
+}
+
+describe("access control", () => {
+  it("sends no wildcard CORS header from /api", async () => {
+    const res = await fetch(`http://${base}/api/sops`, { headers: { origin: "http://evil.example" } });
+    expect(res.status).toBe(200);
+    expect(res.headers.get("access-control-allow-origin")).toBeNull();
+    expect((await fetch(`http://${base}/api/sops`, { method: "OPTIONS" })).status).toBe(405);
+  });
+
+  it("only accepts WebSocket upgrades from the same origin or the allowlist", async () => {
+    expect(await upgradeStatus(`ws://${base}/ws`, "http://evil.example")).toBe(403);
+    expect(await upgradeStatus(`ws://${base}/ws`, "null")).toBe(403);
+    expect(await upgradeStatus(`ws://${base}/ws`, `http://${base}`)).toBe(0); // same origin (built UI)
+    expect(await upgradeStatus(`ws://${base}/ws`, "http://localhost:5173")).toBe(0); // Vite dev proxy
+    expect(await upgradeStatus(`ws://${base}/ws`)).toBe(0); // non-browser client
+    expect(await upgradeStatus(`ws://${base}/elsewhere`)).toBe(404);
+  });
+
+  it("requires VOICELAB_ACCESS_TOKEN on /ws and /api/* when it is set", async () => {
+    const locked = await createApp({
+      config: loadConfig({ VOICELAB_ACCESS_TOKEN: "s3cret-token", VOICELAB_SOP_DIR: join(dataDir, "..", "sops"), VOICELAB_DATA_DIR: dataDir }),
+      logger: createLogger("test-locked"),
+    });
+    try {
+      const { port } = await locked.listen(0, "127.0.0.1");
+      const host = `127.0.0.1:${port}`;
+      expect(await upgradeStatus(`ws://${host}/ws`)).toBe(401);
+      expect(await upgradeStatus(`ws://${host}/ws?token=wrong`)).toBe(401);
+      expect(await upgradeStatus(`ws://${host}/ws?token=s3cret-token`)).toBe(0);
+
+      expect((await fetch(`http://${host}/api/sops`)).status).toBe(401);
+      expect((await fetch(`http://${host}/api/sops`, { headers: { authorization: "Bearer nope" } })).status).toBe(401);
+      expect((await fetch(`http://${host}/api/sops`, { headers: { authorization: "Bearer s3cret-token" } })).status).toBe(200);
+      expect((await fetch(`http://${host}/api/sops?token=s3cret-token`)).status).toBe(200);
+      // liveness stays public for container health checks, without details
+      const health = await fetch(`http://${host}/api/health`);
+      expect(health.status).toBe(200);
+      expect(await health.json()).toEqual({ ok: true, protocol: PROTOCOL_VERSION });
+
+      const c = await connect({ host, query: "?token=s3cret-token" });
+      c.send({ type: "session.start", protocol: PROTOCOL_VERSION, config: { stt: "browser", tts: "browser", listen: "handsfree" } });
+      expect((await c.waitFor("session.ready")).resumed).toBe(false);
+      c.ws.close();
+    } finally {
+      await locked.close();
+    }
+  });
+});
+
 describe("WebSocket round trip (offline mode)", () => {
   it("runs a full turn and produces a run report", async () => {
     const c = await connect();
@@ -116,5 +180,32 @@ describe("WebSocket round trip (offline mode)", () => {
     expect(await persisted.text()).toMatch(/Bradford protein assay/);
     expect((await fetch(`http://${base}/api/runs/..%2Fetc/report`)).status).toBe(400);
     expect((await fetch(`http://${base}/api/runs/run-missing/report`)).status).toBe(404);
+  });
+});
+
+describe("reconnect", () => {
+  it("resumes the run after the socket drops (step, readings and timers intact)", async () => {
+    const start = { type: "session.start", protocol: PROTOCOL_VERSION, config: { stt: "browser", tts: "browser", listen: "handsfree" }, sopId: "bradford-assay" };
+    const a = await connect();
+    a.send(start);
+    const ready = await a.waitFor("session.ready");
+    a.send({ type: "step.goto", stepId: "s4" });
+    a.send({ type: "user.text", text: "absorbance is 0.45" });
+    await a.waitFor("assistant.done");
+    a.send({ type: "timer.start", seconds: 600, label: "Incubate" });
+    await a.waitFor("state", (m) => m.state.timers.length === 1);
+    a.ws.terminate(); // abrupt drop
+    await new Promise((r) => setTimeout(r, 100));
+    expect(app.runs.get(ready.runId)).toBeDefined(); // detached, kept for the grace period
+
+    const b = await connect();
+    b.send({ ...start, resumeRunId: ready.runId });
+    const again = await b.waitFor("session.ready");
+    expect(again).toMatchObject({ runId: ready.runId, resumed: true });
+    const state = (await b.waitFor("state")).state;
+    expect(state.currentStepId).toBe("s4");
+    expect(state.measurements.map((m) => m.value)).toEqual([0.45]);
+    expect(state.timers.map((t) => [t.label, t.status])).toEqual([["Incubate", "running"]]);
+    b.ws.close();
   });
 });

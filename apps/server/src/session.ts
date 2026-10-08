@@ -1,5 +1,8 @@
 /**
- * One Session per WebSocket connection.
+ * One Session per WebSocket connection. The run itself (ExperimentRun, timers,
+ * agent, provenance) lives in a `LiveRun` from the `RunRegistry`, so it
+ * survives reconnects: the session attaches to it on `session.start` (a new run,
+ * or the one named by `resumeRunId`) and detaches on close.
  *
  * Turn pipeline (final transcript or user.text):
  *   1. deterministic `screenUtterance` FIRST — danger findings raise a pinned
@@ -8,11 +11,11 @@
  *   3. supersede any in-flight turn (barge-in), then run the agent turn,
  *      streaming `assistant.delta` and sentence-chunked speech
  *      (`tts.start` + PCM + `tts.end`, or `speak` for browser TTS).
- * Every LabEvent is broadcast (`event` + `state`) and appended to JSONL.
+ * Every LabEvent is broadcast (`event` + `state`) while a client is attached;
+ * the LiveRun appends it to JSONL either way.
  */
 import { randomBytes, randomUUID } from "node:crypto";
 import {
-  ExperimentRun,
   MIC_SAMPLE_RATE,
   PROTOCOL_VERSION,
   renderRunReport,
@@ -26,6 +29,7 @@ import {
   type ServerMessage,
   type SessionConfig,
   type TimerRecord,
+  type ExperimentRun,
 } from "@voicelab/core";
 import type { AppConfig } from "./config";
 import type { Logger } from "./log";
@@ -38,16 +42,21 @@ import { normalizeForSpeech } from "./providers/tts/normalize";
 import { TtsError } from "./providers/tts/elevenlabs";
 import type { TtsProvider } from "./providers/tts/types";
 import { AsyncQueue } from "./util/async-queue";
-import { AgentUnavailableError, type LabAgent, type RunTurnOptions } from "./agent/types";
-import { OfflineAgent } from "./agent/offline";
-import { executeTool, type ToolContext } from "./agent/tools";
-import { NumberProvenance } from "./agent/provenance";
+import { AgentUnavailableError, type RunTurnOptions } from "./agent/types";
+import { executeTool, isCalcTool, type ToolContext } from "./agent/tools";
+import type { NumberProvenance } from "./agent/provenance";
 import type { AgentFactory } from "./agent";
+import { RunRegistry, type LiveRun, type RunOwner } from "./runs";
 
 export interface SessionTransport {
   send(msg: ServerMessage): void;
   sendBinary(pcm: Buffer): void;
+  /** Close the connection (e.g. after another connection resumed this run). */
+  close?(code: number, reason: string): void;
 }
+
+/** WebSocket close code sent to a connection whose run was resumed elsewhere. Clients must not auto-resume on it. */
+export const CLOSE_RESUMED_ELSEWHERE = 4001;
 
 export interface SessionDeps {
   config: AppConfig;
@@ -58,6 +67,8 @@ export interface SessionDeps {
   /** Server TTS provider (undefined => browser TTS / off). */
   tts?: TtsProvider;
   events?: EventLog;
+  /** Shared run registry (reconnect/resume). Without one, the run ends when the session closes. */
+  runs?: RunRegistry;
   logger?: Logger;
 }
 
@@ -71,8 +82,10 @@ interface SpeechJob {
   priority: "normal" | "urgent";
   queue: AsyncQueue<string>;
   abort: AbortController;
-  /** Normalized sentences handed to the TTS provider. */
+  /** Normalized sentences handed to the TTS provider (it reads ahead of playback). */
   taken: string[];
+  /** How many of `taken` (in order) the provider finished streaming to the client. */
+  played: number;
   bytes: number;
   fallback: boolean;
 }
@@ -117,13 +130,12 @@ export function matchWakePhrase(text: string, wakePhrase: string): string | unde
   return undefined;
 }
 
-export class Session {
+export class Session implements RunOwner {
   readonly id = randomUUID();
-  readonly runId = newRunId();
   private cfg: SessionConfig = { ...DEFAULT_SESSION_CONFIG };
-  private run: ExperimentRun | undefined;
-  private agent: LabAgent | undefined;
-  private fallbackAgent: LabAgent | undefined;
+  private live: LiveRun | undefined;
+  private resumed = false;
+  private readonly runs: RunRegistry;
   private started = false;
   private readySent = false;
   private closed = false;
@@ -137,12 +149,7 @@ export class Session {
   private thinking = false;
   private speaking = false;
   private lastStatus = "";
-  private timers = new Map<string, NodeJS.Timeout>();
-  private pendingAcks = new Map<string, Alert>();
-  private unsubscribe: (() => void) | undefined;
   private ttsDisabled = false;
-  /** Numbers the assistant may speak without a caveat: SOP, tool I/O, readings, the operator's words. */
-  private provenance = new NumberProvenance();
   private readonly log: Logger | undefined;
 
   constructor(
@@ -150,12 +157,27 @@ export class Session {
     private readonly transport: SessionTransport,
   ) {
     this.log = deps.logger?.child(`session:${this.id.slice(0, 8)}`);
+    this.runs = deps.runs ?? new RunRegistry({ graceMs: 0, events: deps.events, logger: deps.logger });
+  }
+
+  private get run(): ExperimentRun | undefined {
+    return this.live?.run;
+  }
+
+  /** Numbers the assistant may speak without a caveat: SOP, tool results, readings, the operator's words. */
+  private get provenance(): NumberProvenance {
+    return this.live!.provenance;
   }
 
   // ------------------------------------------------------------ public API
 
   get experimentRun(): ExperimentRun | undefined {
     return this.run;
+  }
+
+  /** Id of the attached run (undefined before `session.start`). */
+  get runId(): string | undefined {
+    return this.live?.runId;
   }
 
   get sessionConfig(): SessionConfig {
@@ -199,6 +221,10 @@ export class Session {
     if (even.length) this.sttStream.write(even);
   }
 
+  /**
+   * Connection closed. The run is detached, not ended: it stays resumable for
+   * the registry's grace period, with its timers running.
+   */
   close(): void {
     if (this.closed) return;
     this.closed = true;
@@ -206,17 +232,19 @@ export class Session {
     this.stopSpeech(true);
     this.sttStream?.close();
     this.sttStream = undefined;
-    for (const t of this.timers.values()) clearTimeout(t);
-    this.timers.clear();
-    if (this.run) {
-      try {
-        this.run.end();
-      } catch (err) {
-        this.log?.warn("run.end failed", err);
-      }
+    if (this.live) this.runs.detach(this.live, this);
+  }
+
+  /** RunOwner: another connection resumed our run. */
+  onEvicted(): void {
+    if (this.closed) return;
+    this.send({ type: "error", message: "This run was resumed from another connection.", fatal: true });
+    this.close(); // detach is a no-op: the run already has its new owner
+    try {
+      this.transport.close?.(CLOSE_RESUMED_ELSEWHERE, "run resumed elsewhere");
+    } catch (err) {
+      this.log?.warn("closing evicted connection failed", err);
     }
-    this.unsubscribe?.();
-    void this.deps.events?.close(this.runId);
   }
 
   // ------------------------------------------------------------ dispatch
@@ -228,7 +256,7 @@ export class Session {
       return;
     }
     if (m.type === "session.start") {
-      await this.start(m.protocol, m.config, m.sopId);
+      await this.start(m.protocol, m.config, m.sopId, m.resumeRunId);
       return;
     }
     if (!this.started) await this.start(PROTOCOL_VERSION, DEFAULT_SESSION_CONFIG);
@@ -258,7 +286,8 @@ export class Session {
         this.updateStatus();
         return;
       case "interrupt":
-        await this.interruptTurn({ includeUrgent: true });
+        // "turn" (default, barge-in): stop the reply, let urgent safety speech finish. "all": explicit Stop.
+        await this.interruptTurn({ includeUrgent: m.scope === "all" });
         return;
       case "sop.select": {
         const sop = this.deps.sops.get(m.sopId);
@@ -268,8 +297,8 @@ export class Session {
         }
         await this.interruptTurn();
         run.loadSop(sop);
-        this.agent?.reset();
-        this.fallbackAgent?.reset();
+        this.live?.agent.reset();
+        this.live?.fallbackAgent?.reset();
         this.syncStt(true); // keyterms are fixed at connect time
         const first = run.currentStep();
         this.say(`${sop.title} loaded.${first ? ` Step 1: ${first.title}.` : ""}`, "normal");
@@ -306,7 +335,7 @@ export class Session {
         return;
       }
       case "alert.ack":
-        this.pendingAcks.delete(m.alertId);
+        this.live?.pendingAcks.delete(m.alertId);
         return;
       case "report.request":
         this.send({ type: "report", markdown: renderRunReport(run.state, run.events, run.sop) });
@@ -329,12 +358,12 @@ export class Session {
   private providers(): ProviderInfo {
     return {
       stt: this.cfg.stt === "server" && this.deps.stt ? this.deps.stt.name : "browser",
-      llm: this.agent?.name ?? (this.deps.config.llm.provider === "anthropic" ? `anthropic:${this.deps.config.llm.model}` : "offline"),
+      llm: this.live?.agent.name ?? (this.deps.config.llm.provider === "anthropic" ? `anthropic:${this.deps.config.llm.model}` : "offline"),
       tts: this.cfg.tts === "server" && this.deps.tts ? this.deps.tts.name : this.cfg.tts,
     };
   }
 
-  private async start(protocol: number, requested: SessionConfig, sopId?: string): Promise<void> {
+  private async start(protocol: number, requested: SessionConfig, sopId?: string, resumeRunId?: string): Promise<void> {
     if (protocol !== PROTOCOL_VERSION) {
       this.send({ type: "error", message: `Protocol mismatch: client ${protocol}, server ${PROTOCOL_VERSION}. Reload the page.`, fatal: true });
       return;
@@ -343,13 +372,14 @@ export class Session {
     if (sopId && !sop) this.send({ type: "error", message: `Unknown SOP "${sopId}"; starting without one` });
 
     if (this.started) {
-      // Re-start on an existing connection: reconfigure, optionally switch SOP.
+      // Re-start on an existing connection: reconfigure, optionally switch SOP. The run stays.
+      if (resumeRunId && resumeRunId !== this.runId) this.log?.warn(`ignoring resumeRunId ${resumeRunId}: this connection already has run ${this.runId}`);
       this.cfg = this.resolveConfig(requested);
       if (sop && sop.id !== this.run?.sop?.id) {
         await this.interruptTurn();
         this.run?.loadSop(sop);
-        this.agent?.reset();
-        this.fallbackAgent?.reset();
+        this.live?.agent.reset();
+        this.live?.fallbackAgent?.reset();
       }
       this.syncStt(true);
       this.sendReady();
@@ -358,24 +388,53 @@ export class Session {
     }
 
     this.cfg = this.resolveConfig(requested);
-    const run = new ExperimentRun({ runId: this.runId, sop, operator: requested.operator });
-    this.run = run;
-    this.unsubscribe = run.subscribe((event, state) => this.onRunEvent(event, state));
-    const ctx = this.toolCtx();
-    this.agent = this.deps.agentFactory(ctx);
-    this.fallbackAgent = this.agent.name === "offline" ? undefined : new OfflineAgent(ctx);
+    // No awaits from here until `started` is set: messages racing this one must not start a second run.
+    const resumed = resumeRunId ? this.runs.attach(resumeRunId, this) : undefined;
+    if (resumed) {
+      this.live = resumed;
+      this.resumed = true;
+      // The run keeps its own SOP; only a run without one picks up the client's.
+      if (sop && !resumed.run.sop) {
+        resumed.run.loadSop(sop);
+        resumed.agent.reset();
+        resumed.fallbackAgent?.reset();
+      }
+    } else {
+      if (resumeRunId) this.log?.info(`run ${resumeRunId} is unknown or expired; starting a new run`);
+      this.live = this.runs.create({ runId: newRunId(), sop, operator: requested.operator, agentFactory: this.deps.agentFactory }, this);
+      this.resumed = false;
+    }
     this.started = true;
-    run.start();
+    if (!resumed) this.live.run.start();
     this.syncStt();
-    this.sendReady();
+    this.sendReady(); // includes the full `state`
     this.updateStatus();
-    this.log?.info(`started run ${this.runId} (stt=${this.cfg.stt}, tts=${this.cfg.tts}, llm=${this.agent.name}${sop ? `, sop=${sop.id}` : ""})`);
+    if (resumed) this.catchUp(resumed);
+    const s = this.run?.sop;
+    this.log?.info(
+      `${resumed ? "resumed" : "started"} run ${this.runId} (stt=${this.cfg.stt}, tts=${this.cfg.tts}, llm=${this.live.agent.name}${s ? `, sop=${s.id}` : ""})`,
+    );
+  }
+
+  /** After a resume: re-send pinned alerts and announce timers that fired while nobody was connected. */
+  private catchUp(live: LiveRun): void {
+    for (const alert of live.pendingAcks.values()) this.send({ type: "alert", alert });
+    const missed = live.missedTimers.splice(0);
+    if (!missed.length) return;
+    for (const t of missed) {
+      this.raiseAlert({ level: "info", title: "Timer done", message: `Timer: ${t.label} finished while you were disconnected.`, source: "timer", requiresAck: false });
+    }
+    const labels = missed.map((t) => t.label.replace(/\s+timer$/i, ""));
+    const list = labels.length === 1 ? labels[0] : `${labels.slice(0, -1).join(", ")} and ${labels.at(-1)}`;
+    this.say(`While you were disconnected, the ${list} timer${labels.length === 1 ? " finished" : "s finished"}.`, "normal");
   }
 
   private sendReady(): void {
     this.send({
       type: "session.ready",
       sessionId: this.id,
+      runId: this.runId ?? "",
+      resumed: this.resumed,
       protocol: PROTOCOL_VERSION,
       providers: this.providers(),
       config: { ...this.cfg },
@@ -530,13 +589,21 @@ export class Session {
     const job = this.cfg.tts === "server" && this.deps.tts ? this.createSpeechJob(turnId, "normal") : undefined;
     const turn: ActiveTurn = { id: turnId, abort, job, text: "", done: Promise.resolve() };
     this.turn = turn;
-    turn.done = this.executeTurn(turn, userText, findings).catch((err) => {
-      this.log?.error("turn failed", err);
-    });
+    const live = this.live!;
+    // A turn left over from a previous connection to this run (aborted on close) finishes first,
+    // so the agent's conversation history is never written by two turns at once.
+    const previous = live.lastTurn;
+    turn.done = previous
+      .then(() => this.executeTurn(turn, userText, findings))
+      .catch((err) => {
+        this.log?.error("turn failed", err);
+      });
+    live.lastTurn = turn.done;
   }
 
   private async executeTurn(turn: ActiveTurn, userText: string, findings: SafetyFinding[]): Promise<void> {
-    const run = this.run!;
+    const live = this.live!;
+    const run = live.run;
     const { id: turnId, abort, job } = turn;
     const chunker = new SentenceChunker();
     if (job) this.enqueueSpeech(job);
@@ -581,30 +648,32 @@ export class Session {
         for (const s of chunker.push(delta)) emitSentence(s);
       },
       onToolCall: (call) => {
-        this.provenance.add(call.input);
         this.send({ type: "tool", trace: { id: call.id, turnId, name: call.name, input: call.input } });
       },
       onToolResult: (r) => {
-        this.provenance.add(r.input);
-        this.provenance.add(r.output);
-        if (r.calc) this.provenance.add(r.calc);
+        // Calculator inputs and successful results are evidence. Other tool inputs are the
+        // agent's own words (notes, deviations, queries), and error messages echo them.
+        if (isCalcTool(r.name)) this.provenance.add(r.input);
+        if (!r.isError) this.provenance.add(r.output);
+        if (r.calc && !r.isError) this.provenance.add(r.calc);
         this.send({ type: "tool", trace: { id: r.id, turnId, name: r.name, input: r.input, output: r.output, isError: r.isError, ms: r.ms } });
         if (r.calc && !r.isError) {
           this.send({ type: "calc", turnId, result: r.calc });
           run.append({ type: "calculation", at: new Date().toISOString(), kind: r.calc.kind, summary: r.calc.summary, spoken: r.calc.spoken });
         }
       },
+      onBacking: (source) => this.provenance.add(source),
     };
 
     try {
-      await this.agent!.runTurn({ userText, ...callbacks });
+      await live.agent.runTurn({ userText, ...callbacks });
     } catch (err) {
       if (!abort.signal.aborted) {
-        if (err instanceof AgentUnavailableError && !err.toolsRan && this.fallbackAgent) {
+        if (err instanceof AgentUnavailableError && !err.toolsRan && live.fallbackAgent) {
           this.log?.warn(`${err.message} -> answering with the offline agent`);
           this.send({ type: "error", message: `${err.message}; answering with the offline assistant.` });
           try {
-            await this.fallbackAgent.runTurn({ userText, ...callbacks });
+            await live.fallbackAgent.runTurn({ userText, ...callbacks });
           } catch (err2) {
             this.log?.error("offline fallback failed", err2);
           }
@@ -654,7 +723,7 @@ export class Session {
   // ------------------------------------------------------------ speech output
 
   private createSpeechJob(turnId: string, priority: SpeechJob["priority"]): SpeechJob {
-    return { turnId, priority, queue: new AsyncQueue<string>(), abort: new AbortController(), taken: [], bytes: 0, fallback: false };
+    return { turnId, priority, queue: new AsyncQueue<string>(), abort: new AbortController(), taken: [], played: 0, bytes: 0, fallback: false };
   }
 
   private stopSpeech(includeUrgent: boolean): void {
@@ -711,13 +780,14 @@ export class Session {
       return;
     }
     let started = false;
+    const hooks = { onChunkDone: () => void job.played++ };
     try {
-      for await (const pcm of tts.synthesize(this.speechSource(job), job.abort.signal)) {
+      for await (const pcm of tts.synthesize(this.speechSource(job), job.abort.signal, hooks)) {
         if (job.abort.signal.aborted || this.closed) break;
         if (!started) {
           started = true;
           this.speaking = true;
-          this.send({ type: "tts.start", turnId: job.turnId, sampleRate: tts.sampleRate });
+          this.send({ type: "tts.start", turnId: job.turnId, sampleRate: tts.sampleRate, priority: job.priority });
           this.updateStatus();
         }
         this.transport.sendBinary(pcm);
@@ -733,10 +803,15 @@ export class Session {
           this.sendReady();
         }
         this.send({ type: "error", message: `Text-to-speech failed (${msg}); using the browser voice.` });
-        // Hand the unplayed text to browser speech, then keep forwarding new sentences.
         job.fallback = true;
-        const unplayed = job.bytes === 0 ? job.taken : job.taken.slice(-1);
-        for (const text of unplayed) this.send({ type: "speak", turnId: job.turnId, text, priority: job.priority });
+        // End the audio stream first so the client plays out what it has, then speaks the rest.
+        if (started) {
+          started = false;
+          this.send({ type: "tts.end", turnId: job.turnId });
+        }
+        // The provider reads ahead, so several taken sentences may never have been streamed:
+        // re-speak every one it didn't finish (including a half-streamed one), in order.
+        for (const text of job.taken.slice(job.played)) this.send({ type: "speak", turnId: job.turnId, text, priority: job.priority });
         for await (const sentence of job.queue) {
           const text = normalizeForSpeech(sentence);
           if (text) this.send({ type: "speak", turnId: job.turnId, text, priority: job.priority });
@@ -759,30 +834,8 @@ export class Session {
 
   // ------------------------------------------------------------ run events, alerts, timers
 
-  private onRunEvent(event: LabEvent, state: ExperimentState): void {
-    this.deps.events?.append(this.runId, event);
-    if (event.type === "run.started") {
-      this.provenance = new NumberProvenance();
-      const sop = this.run?.sop;
-      if (sop) {
-        this.provenance.add(sop);
-        this.provenance.add(sop.steps.map((_, i) => i + 1));
-      }
-    } else {
-      this.provenance.add(event);
-    }
-    switch (event.type) {
-      case "timer.started":
-        this.scheduleTimer(event.timer);
-        break;
-      case "timer.cancelled":
-      case "timer.fired": {
-        const h = this.timers.get(event.timerId);
-        if (h) clearTimeout(h);
-        this.timers.delete(event.timerId);
-        break;
-      }
-    }
+  /** RunOwner: forward a run event to the client. Persistence, provenance and timer scheduling live in LiveRun. */
+  onRunEvent(event: LabEvent, state: ExperimentState): void {
     if (!this.readySent || this.closed) return;
     this.send({ type: "event", event });
     this.send({ type: "state", state });
@@ -798,22 +851,9 @@ export class Session {
     }
   }
 
-  private scheduleTimer(timer: TimerRecord): void {
-    const ms = Math.max(0, Date.parse(timer.endsAt) - Date.now());
-    const prev = this.timers.get(timer.id);
-    if (prev) clearTimeout(prev);
-    const handle = setTimeout(() => this.onTimerFired(timer.id), Math.min(ms, 2 ** 31 - 1));
-    handle.unref?.();
-    this.timers.set(timer.id, handle);
-  }
-
-  private onTimerFired(timerId: string): void {
-    this.timers.delete(timerId);
-    const run = this.run;
-    if (!run || this.closed) return;
-    const t = run.state.timers.find((x) => x.id === timerId);
-    if (!t || t.status !== "running") return;
-    run.fireTimer(timerId);
+  /** RunOwner: a timer fired while this connection is attached. */
+  onTimerFired(t: TimerRecord): void {
+    if (this.closed) return;
     const message = `Timer: ${t.label} is done.`;
     this.raiseAlert({ level: "info", title: "Timer done", message, source: "timer", requiresAck: false });
     this.say(message, "normal");
@@ -821,7 +861,7 @@ export class Session {
 
   private raiseAlert(a: Omit<Alert, "id" | "at">): Alert {
     const alert: Alert = { id: `alert-${randomBytes(4).toString("hex")}`, at: new Date().toISOString(), ...a };
-    if (alert.requiresAck) this.pendingAcks.set(alert.id, alert);
+    if (alert.requiresAck) this.live?.pendingAcks.set(alert.id, alert);
     this.send({ type: "alert", alert });
     return alert;
   }

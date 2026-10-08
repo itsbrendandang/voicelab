@@ -24,6 +24,12 @@ export interface RunTurnOptions {
   onTextDelta: (text: string) => void;
   onToolCall?: (call: ToolCallInfo) => void;
   onToolResult?: (result: ToolResultInfo) => void;
+  /**
+   * Deterministic numbers the agent put in front of the model outside tool
+   * results (e.g. timer time left in `<bench_state>`), so the session can treat
+   * them as backed when the reply relays them.
+   */
+  onBacking?: (source: unknown) => void;
   context?: TurnContext;
 }
 
